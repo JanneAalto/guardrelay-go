@@ -1,0 +1,135 @@
+version: '3'
+
+# Common variables
+vars:
+  BIN_NAME: guardrelay
+  MAIN_PKG: ./cmd/guardrelay-go
+  DIST_DIR: ./dist
+  DEFVERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  VERSION: '{{.VERSION | default .DEFVERSION}}'
+  BUILDTIME: '{{now | date "2006-01-02T15:04:05Z07:00"}}'
+  LDFLAGS: '-s -w -X main.version={{.VERSION}} -X main.buildTime={{.BUILDTIME}}'
+
+env:
+  CGO_ENABLED: '0'
+
+tasks:
+
+  # Clean build artifacts
+  clean:
+    desc: "Remove build artifacts"
+    cmds:
+      - rm -rf {{.DIST_DIR}}
+
+  # Build for Linux ARMv7 (32-bit)
+  build:pi-armv7:
+    desc: "Build for Raspberry Pi ARMv7 (32-bit)"
+    cmds:
+      - mkdir -p {{.DIST_DIR}}/linux-armv7
+      - >
+        GOOS=linux GOARCH=arm GOARM=7
+        go build -trimpath -ldflags "{{.LDFLAGS}}"
+        -o {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}} {{.MAIN_PKG}}
+      - file {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}}
+
+  # Build for Linux ARM64 (aarch64)
+  build:pi-arm64:
+    desc: "Build for Raspberry Pi ARM64 (64-bit)"
+    cmds:
+      - mkdir -p {{.DIST_DIR}}/linux-arm64
+      - >
+        GOOS=linux GOARCH=arm64
+        go build -trimpath -ldflags "{{.LDFLAGS}}"
+        -o {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}} {{.MAIN_PKG}}
+      - file {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}}
+
+  # Generate systemd service and environment templates
+  gen:service:
+    desc: "Generate systemd service and environment templates"
+    required:
+      vars: [MQTT_URL]
+    vars:
+      SERVICE_DIR: '{{.DIST_DIR}}/service'
+      SMARTPI_PREFIX: '{{.SMARTPI_PREFIX | default "smartpi"}}'
+    cmds:
+      - mkdir -p {{.SERVICE_DIR}}
+      - cp deploy/guardrelay.service {{.SERVICE_DIR}}/guardrelay.service
+      - |
+        # ✅ Render /etc/default/guardrelay with the MQTT_URL from Task vars
+        cat > {{.SERVICE_DIR}}/guardrelay.defaults <<EOF
+        # GuardRelay environment configuration
+        MQTT_URL="{{.MQTT_URL}}"
+        MQTT_CLIENT_ID="guardrelay-ampguard"
+        MQTT_BASE_TOPIC="guardrelay/ampguard"
+        HA_DISCOVERY_PREFIX="homeassistant"
+        HA_DEVICE_ID="chargeamps_amp_guard_ABC123"
+        HA_DEVICE_NAME="Charge Amps Amp Guard"
+        SMARTPI_PREFIX="{{.SMARTPI_PREFIX}}"
+        LOG_LEVEL="info"
+        EOF
+
+
+  # Deploy ARMv7 build and service files to Raspberry Pi
+  deploy:pi-armv7:
+    desc: "Deploy ARMv7 binary and service files to Raspberry Pi"
+    requires:
+      vars: [HOST]
+    cmds:
+      - task: build:pi-armv7
+      - task: gen:service
+      - scp {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}} {{.HOST}}:/tmp/{{.BIN_NAME}}
+      - scp {{.DIST_DIR}}/service/guardrelay.service {{.HOST}}:/tmp/guardrelay.service
+      - scp {{.DIST_DIR}}/service/guardrelay.defaults {{.HOST}}:/tmp/guardrelay.defaults
+
+  # Deploy ARM64 build and service files to Raspberry Pi
+  deploy:pi-arm64:
+    desc: "Deploy ARM64 binary and service files to Raspberry Pi"
+    requires:
+      vars: [HOST]
+    cmds:
+      - task: build:pi-arm64
+      - task: gen:service
+      - scp {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}} {{.HOST}}:/tmp/{{.BIN_NAME}}
+      - scp {{.DIST_DIR}}/service/guardrelay.service {{.HOST}}:/tmp/guardrelay.service
+      - scp {{.DIST_DIR}}/service/guardrelay.defaults {{.HOST}}:/tmp/guardrelay.defaults
+
+  # Install service on Raspberry Pi
+  install:pi:
+    desc: "Install systemd service on Raspberry Pi (requires sudo)"
+    requires:
+      vars: [HOST]
+    cmds:
+      - |
+        ssh {{.HOST}} 'bash -s' <<'REMOTE'
+        set -euo pipefail
+        install -m 0755 -o root -g root /tmp/guardrelay /usr/local/bin/guardrelay
+        install -m 0644 -o root -g root /tmp/guardrelay.service /etc/systemd/system/guardrelay.service
+        install -m 0644 -o root -g root /tmp/guardrelay.defaults /etc/default/guardrelay
+        systemctl daemon-reload
+        systemctl enable guardrelay.service
+        systemctl restart guardrelay.service
+        systemctl status guardrelay.service --no-pager -l || true
+        REMOTE
+
+  # Update only the binary on Raspberry Pi
+  update:pi:
+    desc: "Update only the binary on Raspberry Pi"
+    requires:
+      vars: [HOST, ARCH]
+    cmds:
+      - |
+        case "{{.ARCH}}" in
+          armv7)  SRC="{{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}}";;
+          arm64)  SRC="{{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}}";;
+          *) echo "ARCH must be armv7 or arm64"; exit 1;;
+        esac
+      - scp $SRC {{.HOST}}:/tmp/{{.BIN_NAME}}
+      - |
+        ssh {{.HOST}} 'sudo bash -s' <<'REMOTE'
+        set -euo pipefail
+        systemctl stop guardrelay.service || true
+        install -m 0755 -o root -g root /tmp/guardrelay /usr/local/bin/guardrelay
+        systemctl start guardrelay.service
+        systemctl status guardrelay.service --no-pager -l || true
+        REMOTE
