@@ -29,11 +29,16 @@ type SensorConfig struct {
 	UnitOfMeasurement   string   `json:"unit_of_measurement,omitempty"`
 	DeviceClass         string   `json:"device_class,omitempty"`
 	StateClass          string   `json:"state_class,omitempty"`
+	EntityCategory      string   `json:"entity_category,omitempty"`
 	Device              HADevice `json:"device"`
 	AvailabilityTopic   string   `json:"availability_topic,omitempty"`
 	PayloadAvailable    string   `json:"payload_available,omitempty"`
 	PayloadNotAvailable string   `json:"payload_not_available,omitempty"`
+	PayloadOn           string   `json:"payload_on,omitempty"`
+	PayloadOff          string   `json:"payload_off,omitempty"`
 }
+
+const measurementProblemKey = "measurements_stale"
 
 type sensorDefinition struct {
 	input, key, icon, name, unit, stateClass, deviceClass string
@@ -56,6 +61,10 @@ var sensorDefinitions = []sensorDefinition{
 	{"", "energy_l2", "mdi:lightning-bolt", "Imported energy L2", "kWh", "total_increasing", "energy", 0},
 	{"", "energy_l3", "mdi:lightning-bolt", "Imported energy L3", "kWh", "total_increasing", "energy", 0},
 	{"", "energy_total", "mdi:lightning-bolt", "Imported energy total", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_export_l1", "mdi:transmission-tower-export", "Exported energy L1", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_export_l2", "mdi:transmission-tower-export", "Exported energy L2", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_export_l3", "mdi:transmission-tower-export", "Exported energy L3", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_export_total", "mdi:transmission-tower-export", "Exported energy total", "kWh", "total_increasing", "energy", 0},
 	{"COS1", "power_factor_l1", "mdi:angle-acute", "Power factor L1", "", "measurement", "power_factor", 0},
 	{"COS2", "power_factor_l2", "mdi:angle-acute", "Power factor L2", "", "measurement", "power_factor", 0},
 	{"COS3", "power_factor_l3", "mdi:angle-acute", "Power factor L3", "", "measurement", "power_factor", 0},
@@ -92,6 +101,23 @@ func discoverySensors(cfg *Config) []SensorConfig {
 	return out
 }
 
+func discoveryMeasurementProblem(cfg *Config) SensorConfig {
+	return SensorConfig{
+		Name:                "Measurement data stale",
+		Icon:                "mdi:clock-alert-outline",
+		UniqueID:            cfg.HADeviceID + "_" + measurementProblemKey,
+		StateTopic:          cfg.MQTTBaseTopic + "/state/" + measurementProblemKey,
+		DeviceClass:         "problem",
+		EntityCategory:      "diagnostic",
+		Device:              HADevice{Identifiers: []string{cfg.HADeviceID}, Manufacturer: "Charge Amps", Model: "Amp Guard", Name: cfg.HADeviceName},
+		AvailabilityTopic:   cfg.MQTTBaseTopic + "/status",
+		PayloadAvailable:    "online",
+		PayloadNotAvailable: "offline",
+		PayloadOn:           "ON",
+		PayloadOff:          "OFF",
+	}
+}
+
 func publishDiscovery(ctx context.Context, cfg *Config, cm mqttPublisher) error {
 	for _, key := range obsoleteSensorKeys {
 		topic := fmt.Sprintf("%s/sensor/%s_%s/config", cfg.HADiscoveryPref, cfg.HADeviceID, key)
@@ -108,6 +134,15 @@ func publishDiscovery(ctx context.Context, cfg *Config, cm mqttPublisher) error 
 		if err := publish(ctx, cm, topic, js, true); err != nil {
 			return err
 		}
+	}
+	sc := discoveryMeasurementProblem(cfg)
+	js, err := json.Marshal(sc)
+	if err != nil {
+		return fmt.Errorf("marshal binary sensor %s: %w", sc.UniqueID, err)
+	}
+	topic := fmt.Sprintf("%s/binary_sensor/%s/config", cfg.HADiscoveryPref, sc.UniqueID)
+	if err := publish(ctx, cm, topic, js, true); err != nil {
+		return err
 	}
 	return nil
 }
@@ -149,6 +184,11 @@ func (r *smartPiRelay) handleSmartPi(pub *paho.Publish, ctx context.Context, cm 
 		log.Printf("SmartPi payload is not a finite number: topic=%s payload=%q", topic, msg)
 		return
 	}
+	if !pub.Retain {
+		if !r.recordMeasurement(ctx, sensor.input, receivedAt) {
+			return
+		}
+	}
 	if sensor.powerPhase != 0 && !pub.Retain {
 		if err := r.recordPower(ctx, sensor.powerPhase-1, val, receivedAt); err != nil {
 			log.Print(err)
@@ -159,6 +199,11 @@ func (r *smartPiRelay) handleSmartPi(pub *paho.Publish, ctx context.Context, cm 
 	payload := []byte(strconv.FormatFloat(val, 'f', 4, 64))
 	if err := publish(ctx, cm, stateTopic, payload, false); err != nil {
 		log.Print(err)
+	}
+	if !pub.Retain {
+		if err := r.publishMeasurementProblem(ctx, cm); err != nil {
+			log.Print(err)
+		}
 	}
 
 	if sensor.powerPhase != 0 && !pub.Retain {

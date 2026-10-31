@@ -64,9 +64,9 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 				relay.handleSmartPi(&paho.Publish{
 					Topic: prefix + "/" + tt.input, Payload: []byte(tt.payload),
 				}, context.Background(), publisher)
-				wantPackets := 1
+				wantPackets := 2
 				if strings.HasPrefix(tt.input, "P") {
-					wantPackets += 4
+					wantPackets += 8
 				}
 				if len(publisher.packets) != wantPackets {
 					t.Fatalf("expected phase state and any energy snapshot, got %d packets", len(publisher.packets))
@@ -75,6 +75,10 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 				if packet.Topic != cfg.MQTTBaseTopic+"/state/"+tt.key ||
 					string(packet.Payload) != tt.state || packet.Retain || packet.QoS != 1 {
 					t.Fatalf("unexpected publication: %+v", packet)
+				}
+				if health := publisher.packets[1]; health.Topic != cfg.MQTTBaseTopic+"/state/"+measurementProblemKey ||
+					string(health.Payload) != "ON" || !health.Retain {
+					t.Fatalf("initial measurement health was not retained as stale: %+v", health)
 				}
 				if strings.HasPrefix(tt.input, "P") {
 					index := int(tt.input[1] - '1')
@@ -132,7 +136,7 @@ func TestSmartPiNumericPayloads(t *testing.T) {
 			publisher := &sensorPublisher{}
 			relay.handleSmartPi(&paho.Publish{Topic: "smartpi/I1", Payload: []byte(tt.payload)},
 				context.Background(), publisher)
-			if len(publisher.packets) != 1 || string(publisher.packets[0].Payload) != tt.want {
+			if len(publisher.packets) != 2 || string(publisher.packets[0].Payload) != tt.want {
 				t.Fatalf("unexpected numeric output: %+v", publisher.packets)
 			}
 		})
@@ -196,7 +200,7 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 	cfg := testConfig()
 	cfg.MQTTBaseTopic, cfg.HADeviceID = "custom/relay", "custom_device"
 	sensors := discoverySensors(cfg)
-	if len(sensors) != len(measurementCases)+5 {
+	if len(sensors) != len(measurementCases)+9 {
 		t.Fatalf("unexpected number of discovered sensors: %d", len(sensors))
 	}
 	byKey := make(map[string]SensorConfig)
@@ -241,7 +245,10 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 			t.Fatalf("obsolete sensor is still discovered: %s", key)
 		}
 	}
-	for _, key := range []string{"energy_l1", "energy_l2", "energy_l3", "energy_total"} {
+	for _, key := range []string{
+		"energy_l1", "energy_l2", "energy_l3", "energy_total",
+		"energy_export_l1", "energy_export_l2", "energy_export_l3", "energy_export_total",
+	} {
 		if sensor := byKey[key]; sensor.UnitOfMeasurement != "kWh" ||
 			sensor.DeviceClass != "energy" || sensor.StateClass != "total_increasing" {
 			t.Fatalf("incorrect imported energy metadata: %+v", sensor)
@@ -250,6 +257,77 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 	if sensor := byKey["power_total"]; sensor.UnitOfMeasurement != "W" ||
 		sensor.DeviceClass != "power" || sensor.StateClass != "measurement" {
 		t.Fatalf("existing total power metadata changed: %+v", sensor)
+	}
+	problem := discoveryMeasurementProblem(cfg)
+	if problem.UniqueID != cfg.HADeviceID+"_"+measurementProblemKey ||
+		problem.StateTopic != cfg.MQTTBaseTopic+"/state/"+measurementProblemKey ||
+		problem.DeviceClass != "problem" || problem.EntityCategory != "diagnostic" ||
+		problem.PayloadOn != "ON" || problem.PayloadOff != "OFF" ||
+		problem.AvailabilityTopic != cfg.MQTTBaseTopic+"/status" {
+		t.Fatalf("incorrect measurement problem binary sensor: %+v", problem)
+	}
+	payload, err := json.Marshal(problem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["state_class"]; exists {
+		t.Fatal("binary sensor must omit state_class")
+	}
+}
+
+func TestMeasurementFreshnessPublishesOnlyRetainedTransitions(t *testing.T) {
+	cfg := testConfig()
+	relay := newSmartPiRelay(cfg)
+	now := time.Unix(1000, 0)
+	relay.now = func() time.Time { return now }
+	publisher := &sensorPublisher{}
+	if err := relay.publishMeasurementProblem(context.Background(), publisher); err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.publishMeasurementProblem(context.Background(), publisher); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.packets) != 1 || string(publisher.packets[0].Payload) != "ON" ||
+		!publisher.packets[0].Retain {
+		t.Fatalf("initial stale state was not published once: %+v", publisher.packets)
+	}
+	for _, definition := range sensorDefinitions {
+		if definition.input != "" {
+			if !relay.recordMeasurement(context.Background(), definition.input, now) {
+				t.Fatalf("failed to record %s", definition.input)
+			}
+		}
+	}
+	if err := relay.publishMeasurementProblem(context.Background(), publisher); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.packets) != 2 || string(publisher.packets[1].Payload) != "OFF" ||
+		!publisher.packets[1].Retain {
+		t.Fatalf("fresh transition was not published: %+v", publisher.packets)
+	}
+	now = now.Add(cfg.PhaseFreshness)
+	if err := relay.publishMeasurementProblem(context.Background(), publisher); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.packets) != 3 || string(publisher.packets[2].Payload) != "ON" ||
+		!publisher.packets[2].Retain {
+		t.Fatalf("stale transition was not published: %+v", publisher.packets)
+	}
+}
+
+func TestCanceledMeasurementDoesNotRefreshHealth(t *testing.T) {
+	relay := newSmartPiRelay(testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if relay.recordMeasurement(ctx, "I1", time.Unix(1000, 0)) {
+		t.Fatal("canceled input refreshed measurement health")
+	}
+	if len(relay.measurements) != 0 || !relay.measurementProblem(time.Now()) {
+		t.Fatal("canceled input changed measurement health state")
 	}
 }
 
@@ -263,7 +341,7 @@ func TestDiscoveryMigration(t *testing.T) {
 	oldKeys := []string{
 		"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
 	}
-	if len(publisher.packets) != len(oldKeys)+len(discoverySensors(cfg)) {
+	if len(publisher.packets) != len(oldKeys)+len(discoverySensors(cfg))+1 {
 		t.Fatalf("incorrect discovery packet count: %d", len(publisher.packets))
 	}
 	seenTopics := make(map[string]bool)
@@ -283,7 +361,11 @@ func TestDiscoveryMigration(t *testing.T) {
 		if err := json.Unmarshal(packet.Payload, &sensor); err != nil {
 			t.Fatal(err)
 		}
-		if packet.Topic != cfg.HADiscoveryPref+"/sensor/"+sensor.UniqueID+"/config" ||
+		component := "sensor"
+		if strings.HasPrefix(packet.Topic, cfg.HADiscoveryPref+"/binary_sensor/") {
+			component = "binary_sensor"
+		}
+		if packet.Topic != cfg.HADiscoveryPref+"/"+component+"/"+sensor.UniqueID+"/config" ||
 			!strings.HasPrefix(sensor.UniqueID, cfg.HADeviceID+"_") {
 			t.Fatalf("discovery escaped configured device/prefix: %+v", packet)
 		}

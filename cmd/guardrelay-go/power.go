@@ -15,20 +15,71 @@ type phaseSample struct {
 }
 
 type smartPiRelay struct {
-	cfg             *Config
-	now             func() time.Time
-	mu              sync.Mutex
-	phases          [3]phaseSample
-	energy          [3]float64
-	energyReady     bool
-	energyPublishMu sync.Mutex
-	checkpointMu    sync.Mutex
-	savedEnergy     [3]float64
-	checkpointSaved bool
+	cfg                 *Config
+	now                 func() time.Time
+	mu                  sync.Mutex
+	phases              [3]phaseSample
+	measurements        map[string]time.Time
+	energy              [3]float64
+	exportedEnergy      [3]float64
+	energyReady         bool
+	energyPublishMu     sync.Mutex
+	healthMu            sync.Mutex
+	healthKnown         bool
+	healthProblem       bool
+	checkpointMu        sync.Mutex
+	savedEnergy         [3]float64
+	savedExportedEnergy [3]float64
+	checkpointSaved     bool
 }
 
 func newSmartPiRelay(cfg *Config) *smartPiRelay {
-	return &smartPiRelay{cfg: cfg, now: time.Now}
+	return &smartPiRelay{cfg: cfg, now: time.Now, measurements: make(map[string]time.Time)}
+}
+
+func (r *smartPiRelay) recordMeasurement(ctx context.Context, input string, receivedAt time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	r.measurements[input] = receivedAt
+	return true
+}
+
+func (r *smartPiRelay) measurementProblem(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, definition := range sensorDefinitions {
+		if definition.input == "" {
+			continue
+		}
+		receivedAt := r.measurements[definition.input]
+		age := now.Sub(receivedAt)
+		if receivedAt.IsZero() || age < 0 || age >= r.cfg.PhaseFreshness {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *smartPiRelay) publishMeasurementProblem(ctx context.Context, client mqttPublisher) error {
+	r.healthMu.Lock()
+	defer r.healthMu.Unlock()
+	problem := r.measurementProblem(r.now())
+	if r.healthKnown && problem == r.healthProblem {
+		return nil
+	}
+	payload := "OFF"
+	if problem {
+		payload = "ON"
+	}
+	if err := publish(ctx, client, r.cfg.MQTTBaseTopic+"/state/"+measurementProblemKey,
+		[]byte(payload), true); err != nil {
+		return err
+	}
+	r.healthKnown, r.healthProblem = true, problem
+	return nil
 }
 
 func (r *smartPiRelay) recordPower(ctx context.Context, phase int, value float64, receivedAt time.Time) error {
@@ -45,21 +96,33 @@ func (r *smartPiRelay) recordPower(ctx context.Context, phase int, value float64
 		return nil
 	}
 	// Divide time first so a finite kWh increment does not overflow in watts-seconds.
-	increment := math.Max(previous.value, 0) * (elapsed.Seconds() / 3600000)
-	next := r.energy
-	next[phase] += increment
-	total := next[0] + next[1] + next[2]
-	if math.IsNaN(total) || math.IsInf(total, 0) {
-		return fmt.Errorf("SmartPi imported energy for phase %d would overflow; counters unchanged", phase+1)
+	hours := elapsed.Seconds() / 3600000
+	nextImported, nextExported := r.energy, r.exportedEnergy
+	nextImported[phase] += math.Max(previous.value, 0) * hours
+	nextExported[phase] += math.Max(-previous.value, 0) * hours
+	if !finiteEnergyTotal(nextImported) || !finiteEnergyTotal(nextExported) {
+		return fmt.Errorf("SmartPi energy for phase %d would overflow; counters unchanged", phase+1)
 	}
-	r.energy = next
+	r.energy, r.exportedEnergy = nextImported, nextExported
 	return nil
+}
+
+func finiteEnergyTotal(values [3]float64) bool {
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return !math.IsNaN(total) && !math.IsInf(total, 0)
 }
 
 func (r *smartPiRelay) resetPhases() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.phases = [3]phaseSample{}
+	clear(r.measurements)
+	r.mu.Unlock()
+	r.healthMu.Lock()
+	r.healthKnown = false
+	r.healthMu.Unlock()
 }
 
 func (r *smartPiRelay) totalPower(ctx context.Context) (float64, bool) {

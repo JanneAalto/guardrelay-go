@@ -71,6 +71,9 @@ func initializeMQTT(ctx context.Context, cfg *Config, client mqttSubscriber, rel
 	if err := publishDiscovery(ctx, cfg, client); err != nil {
 		return err
 	}
+	if err := relay.publishMeasurementProblem(ctx, client); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -160,6 +163,29 @@ func (l *mqttLifecycle) work() {
 				return
 			}
 			log.Println("MQTT connected and ready")
+			l.monitorMeasurementFreshness(event.ctx, event.client)
+		}
+	}
+}
+
+func (l *mqttLifecycle) monitorMeasurementFreshness(ctx context.Context, client mqttPublisher) {
+	interval := time.Second
+	if interval > l.cfg.PhaseFreshness {
+		interval = l.cfg.PhaseFreshness
+	}
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := l.relay.publishMeasurementProblem(ctx, client); err != nil {
+				log.Printf("Publish measurement freshness: %v", err)
+			}
 		}
 	}
 }

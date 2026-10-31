@@ -182,10 +182,48 @@ tasks:
           echo "Missing or empty deployment binary: /tmp/guardrelay" >&2
           exit 1
         fi
+        installed_binary=/usr/local/bin/guardrelay
+        if [ ! -x "$installed_binary" ]; then
+          echo "GuardRelay is not installed at $installed_binary" >&2
+          exit 1
+        fi
+        work=$(mktemp -d /usr/local/bin/.guardrelay-update.XXXXXX)
+        backup="$work/rollback"
+        staged="$work/new"
+        cleanup() {
+          rm -f -- "$backup" "$staged" /tmp/guardrelay
+          if [ -d "$work" ]; then
+            rmdir -- "$work"
+          fi
+        }
+        trap cleanup EXIT
+        cp -p "$installed_binary" "$backup"
+        install -m 0755 -o root -g root /tmp/guardrelay "$staged"
         systemctl stop guardrelay.service
-        install -m 0755 -o root -g root /tmp/guardrelay /usr/local/bin/guardrelay
-        rm /tmp/guardrelay
-        systemctl start guardrelay.service
-        systemctl is-active --quiet guardrelay.service
+        if ! mv -f -- "$staged" "$installed_binary"; then
+          echo "Could not install the staged GuardRelay binary" >&2
+          if ! systemctl start guardrelay.service; then
+            echo "Could not restart GuardRelay after the failed update" >&2
+          fi
+          exit 1
+        fi
+        if ! systemctl start guardrelay.service || ! systemctl is-active --quiet guardrelay.service; then
+          echo "Updated GuardRelay failed to start; restoring the previous binary" >&2
+          if ! systemctl stop guardrelay.service; then
+            echo "Could not stop the failed GuardRelay service before rollback" >&2
+            exit 1
+          fi
+          mv -f -- "$backup" "$installed_binary"
+          if ! systemctl start guardrelay.service; then
+            echo "Rollback restored the binary but the service did not start" >&2
+            exit 1
+          fi
+          if ! systemctl is-active --quiet guardrelay.service; then
+            echo "Rollback restored the binary but the service is not active" >&2
+            exit 1
+          fi
+          echo "Previous GuardRelay binary restored and service restarted" >&2
+          exit 1
+        fi
         systemctl status guardrelay.service --no-pager -l
         REMOTE

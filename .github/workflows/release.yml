@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Task for deployment contract tests
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.54.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - name: Build release binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/guardrelay-linux-amd64 ./cmd/guardrelay-go
+          GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "-s -w" -o dist/guardrelay-linux-armv7 ./cmd/guardrelay-go
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/guardrelay-linux-arm64 ./cmd/guardrelay-go
+          (cd dist && sha256sum guardrelay-* > SHA256SUMS)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

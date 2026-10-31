@@ -20,11 +20,12 @@ const (
 )
 
 type energyCheckpoint struct {
-	Version       int        `json:"version"`
-	DeviceID      string     `json:"device_id"`
-	SmartPiPrefix string     `json:"smartpi_prefix"`
-	BaseTopic     string     `json:"base_topic"`
-	Phases        []*float64 `json:"imported_kwh"`
+	Version        int        `json:"version"`
+	DeviceID       string     `json:"device_id"`
+	SmartPiPrefix  string     `json:"smartpi_prefix"`
+	BaseTopic      string     `json:"base_topic"`
+	Phases         []*float64 `json:"imported_kwh"`
+	ExportedPhases []*float64 `json:"exported_kwh,omitempty"`
 }
 
 func (r *smartPiRelay) restoreCheckpoint() error {
@@ -57,25 +58,41 @@ func (r *smartPiRelay) restoreCheckpoint() error {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return fmt.Errorf("energy checkpoint contains trailing data")
 	}
-	if state.Version != 1 || state.DeviceID != r.cfg.HADeviceID ||
+	if state.Version != 1 && state.Version != 2 || state.DeviceID != r.cfg.HADeviceID ||
 		state.SmartPiPrefix != r.cfg.SmartPiPrefix || state.BaseTopic != r.cfg.MQTTBaseTopic ||
 		len(state.Phases) != 3 {
 		return fmt.Errorf("energy checkpoint version, meter identity, or phase count does not match configuration")
 	}
-	var values [3]float64
+	var imported, exported [3]float64
 	for i, value := range state.Phases {
 		if value == nil {
 			return fmt.Errorf("energy checkpoint contains null imported kWh")
 		}
-		values[i] = *value
+		imported[i] = *value
 	}
-	if err := validateCheckpointEnergy(values); err != nil {
+	if state.Version == 1 {
+		if len(state.ExportedPhases) != 0 {
+			return fmt.Errorf("version 1 energy checkpoint unexpectedly contains exported kWh")
+		}
+	} else {
+		if len(state.ExportedPhases) != 3 {
+			return fmt.Errorf("energy checkpoint exported phase count does not match configuration")
+		}
+		for i, value := range state.ExportedPhases {
+			if value == nil {
+				return fmt.Errorf("energy checkpoint contains null exported kWh")
+			}
+			exported[i] = *value
+		}
+	}
+	if err := validateCheckpointEnergy(imported, exported); err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.energy = values
+	r.energy, r.exportedEnergy = imported, exported
 	r.mu.Unlock()
-	r.savedEnergy, r.checkpointSaved = values, true
+	r.savedEnergy, r.savedExportedEnergy = imported, exported
+	r.checkpointSaved = state.Version == 2
 	log.Printf("Restored imported energy from %s", r.cfg.EnergyStateFile)
 	return nil
 }
@@ -87,17 +104,18 @@ func (r *smartPiRelay) saveCheckpoint() error {
 	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
 	r.mu.Lock()
-	values := r.energy
+	imported, exported := r.energy, r.exportedEnergy
 	r.mu.Unlock()
-	if r.checkpointSaved && values == r.savedEnergy {
+	if r.checkpointSaved && imported == r.savedEnergy && exported == r.savedExportedEnergy {
 		return nil
 	}
-	if err := validateCheckpointEnergy(values); err != nil {
+	if err := validateCheckpointEnergy(imported, exported); err != nil {
 		return err
 	}
 	state := energyCheckpoint{
-		Version: 1, DeviceID: r.cfg.HADeviceID, SmartPiPrefix: r.cfg.SmartPiPrefix,
-		BaseTopic: r.cfg.MQTTBaseTopic, Phases: []*float64{&values[0], &values[1], &values[2]},
+		Version: 2, DeviceID: r.cfg.HADeviceID, SmartPiPrefix: r.cfg.SmartPiPrefix,
+		BaseTopic: r.cfg.MQTTBaseTopic, Phases: []*float64{&imported[0], &imported[1], &imported[2]},
+		ExportedPhases: []*float64{&exported[0], &exported[1], &exported[2]},
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -139,20 +157,27 @@ func (r *smartPiRelay) saveCheckpoint() error {
 	if err := errors.Join(directory.Sync(), directory.Close()); err != nil {
 		return fmt.Errorf("sync energy checkpoint directory: %w", err)
 	}
-	r.savedEnergy, r.checkpointSaved = values, true
+	r.savedEnergy, r.savedExportedEnergy, r.checkpointSaved = imported, exported, true
 	return nil
 }
 
-func validateCheckpointEnergy(values [3]float64) error {
+func validateCheckpointEnergy(imported, exported [3]float64) error {
+	if err := validateEnergyCounters(imported, "imported"); err != nil {
+		return err
+	}
+	return validateEnergyCounters(exported, "exported")
+}
+
+func validateEnergyCounters(values [3]float64, direction string) error {
 	var total float64
 	for _, value := range values {
 		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
-			return fmt.Errorf("energy checkpoint contains invalid imported kWh")
+			return fmt.Errorf("energy checkpoint contains invalid %s kWh", direction)
 		}
 		total += value
 	}
 	if math.IsInf(total, 0) {
-		return fmt.Errorf("energy checkpoint total overflows")
+		return fmt.Errorf("energy checkpoint %s total overflows", direction)
 	}
 	return nil
 }

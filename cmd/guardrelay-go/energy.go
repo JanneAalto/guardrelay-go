@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 )
 
@@ -12,14 +11,18 @@ func (r *smartPiRelay) publishEnergy(ctx context.Context, client mqttPublisher) 
 	r.energyPublishMu.Lock()
 	defer r.energyPublishMu.Unlock()
 	r.mu.Lock()
-	values := [4]float64{r.energy[0], r.energy[1], r.energy[2], r.energy[0] + r.energy[1] + r.energy[2]}
+	values := [8]float64{
+		r.energy[0], r.energy[1], r.energy[2], r.energy[0] + r.energy[1] + r.energy[2],
+		r.exportedEnergy[0], r.exportedEnergy[1], r.exportedEnergy[2],
+		r.exportedEnergy[0] + r.exportedEnergy[1] + r.exportedEnergy[2],
+	}
 	r.mu.Unlock()
+	keys := [...]string{
+		"energy_l1", "energy_l2", "energy_l3", "energy_total",
+		"energy_export_l1", "energy_export_l2", "energy_export_l3", "energy_export_total",
+	}
 	for i, value := range values {
-		key := "energy_total"
-		if i < 3 {
-			key = fmt.Sprintf("energy_l%d", i+1)
-		}
-		if err := publish(ctx, client, r.cfg.MQTTBaseTopic+"/state/"+key,
+		if err := publish(ctx, client, r.cfg.MQTTBaseTopic+"/state/"+keys[i],
 			[]byte(strconv.FormatFloat(value, 'f', -1, 64)), true); err != nil {
 			return err
 		}

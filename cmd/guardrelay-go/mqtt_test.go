@@ -103,18 +103,20 @@ func TestPublishAcknowledgments(t *testing.T) {
 		{"missing", nil, nil, false},
 		{"transport", nil, errors.New("connection lost"), false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeMQTT()
-			f.publishAck, f.publishErr = tt.ack, tt.err
-			err := publish(context.Background(), f, "test/state", []byte("42"), false)
-			if (err == nil) != tt.ok {
-				t.Fatalf("unexpected result: %v", err)
-			}
+		t.Run(
+			tt.name, func(t *testing.T) {
+				f := newFakeMQTT()
+				f.publishAck, f.publishErr = tt.ack, tt.err
+				err := publish(context.Background(), f, "test/state", []byte("42"), false)
+				if (err == nil) != tt.ok {
+					t.Fatalf("unexpected result: %v", err)
+				}
 
-			if _, invalid := f.snapshot(); invalid {
-				t.Fatal("publish was not bounded")
-			}
-		})
+				if _, invalid := f.snapshot(); invalid {
+					t.Fatal("publish was not bounded")
+				}
+			},
+		)
 	}
 }
 
@@ -139,9 +141,10 @@ func TestInitializeMQTTOrdering(t *testing.T) {
 	if invalid {
 		t.Fatal("unbounded initialization operation")
 	}
-	if ops[0] != cfg.MQTTBaseTopic+"/status=offline" || ops[5] != "subscribe smartpi/#" ||
+	if ops[0] != cfg.MQTTBaseTopic+"/status=offline" || ops[9] != "subscribe smartpi/#" ||
+		ops[len(ops)-2] != cfg.MQTTBaseTopic+"/state/"+measurementProblemKey+"=ON" ||
 		ops[len(ops)-1] != cfg.MQTTBaseTopic+"/status=online" ||
-		len(ops) != len(discoverySensors(cfg))+len(obsoleteSensorKeys)+7 {
+		len(ops) != len(discoverySensors(cfg))+len(obsoleteSensorKeys)+13 {
 		t.Fatalf("unexpected initialization ordering: %v", ops)
 	}
 }
@@ -154,6 +157,7 @@ func TestInitializeMQTTFailures(t *testing.T) {
 		{"offline rejected", func(f *fakeMQTT) { f.publishAck.ReasonCode = 0x87 }},
 		{"energy rejected", func(f *fakeMQTT) { f.failPrefix = "guardrelay/ampguard/state/energy_" }},
 		{"discovery rejected", func(f *fakeMQTT) { f.failPrefix = "homeassistant/" }},
+		{"measurement problem rejected", func(f *fakeMQTT) { f.failPrefix = "guardrelay/ampguard/state/" + measurementProblemKey }},
 		{"subscribe transport", func(f *fakeMQTT) { f.subErr = errors.New("lost connection") }},
 		{"subscribe rejected", func(f *fakeMQTT) { f.subAck.Reasons = []byte{0x87} }},
 		{"subscribe unexpected QoS", func(f *fakeMQTT) { f.subAck.Reasons = []byte{2} }},
@@ -161,20 +165,22 @@ func TestInitializeMQTTFailures(t *testing.T) {
 		{"subscribe missing", func(f *fakeMQTT) { f.subAck = nil }},
 		{"subscribe wrong count", func(f *fakeMQTT) { f.subAck.Reasons = []byte{1, 1} }},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeMQTT()
-			tt.change(f)
-			cfg := testConfig()
-			if err := initializeMQTT(context.Background(), cfg, f, newSmartPiRelay(cfg)); err == nil {
-				t.Fatal("initialization failure was ignored")
-			}
-			ops, _ := f.snapshot()
-			for _, op := range ops {
-				if strings.HasSuffix(op, "=online") {
-					t.Fatal("announced online after initialization failure")
+		t.Run(
+			tt.name, func(t *testing.T) {
+				f := newFakeMQTT()
+				tt.change(f)
+				cfg := testConfig()
+				if err := initializeMQTT(context.Background(), cfg, f, newSmartPiRelay(cfg)); err == nil {
+					t.Fatal("initialization failure was ignored")
 				}
-			}
-		})
+				ops, _ := f.snapshot()
+				for _, op := range ops {
+					if strings.HasSuffix(op, "=online") {
+						t.Fatal("announced online after initialization failure")
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -331,7 +337,7 @@ func serveLifecycleBroker(conn net.Conn, cfg *Config, cancel context.CancelFunc)
 		case *packets.Connect:
 			response = packets.NewControlPacket(packets.CONNACK)
 		case *packets.Subscribe:
-			if len(zeroEnergy) != 4 {
+			if len(zeroEnergy) != 8 {
 				return fmt.Errorf("subscription started before all energy startup zeros")
 			}
 			response = packets.NewControlPacket(packets.SUBACK)

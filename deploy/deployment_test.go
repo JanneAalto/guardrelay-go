@@ -111,6 +111,12 @@ chmod "$mode" "$dst"
 `,
 		"systemctl": `
 echo "systemctl $*" >> "$DEPLOY_TEST_ROOT/log"
+if [ "$1" = start ] && [ "${DEPLOY_TEST_FAIL:-}" = start ]; then
+  if [ ! -e "$DEPLOY_TEST_ROOT/start-failed" ]; then
+    touch "$DEPLOY_TEST_ROOT/start-failed"
+    exit 7
+  fi
+fi
 if [ "$1" = "${DEPLOY_TEST_FAIL:-}" ]; then exit 7; fi
 `,
 	}
@@ -244,6 +250,7 @@ func TestDeploymentArchitectures(t *testing.T) {
 			if !strings.Contains(log, "build "+target) || strings.Count(log, "scp ") != 3 {
 				t.Fatalf("wrong build/upload contract:\n%s", log)
 			}
+			h.write("usr/local/bin/guardrelay", "previous binary\n", 0755)
 			h.run(true, "update:pi", "HOST=test-host", "ARCH="+arch)
 			if h.read("usr/local/bin/guardrelay") != "test binary\n" {
 				t.Fatal("update did not install the selected binary")
@@ -316,8 +323,12 @@ func TestDeploymentFailures(t *testing.T) {
 		t.Run("failed update "+action, func(t *testing.T) {
 			h := newDeploymentHarness(t)
 			h.write("dist with spaces/linux-arm64/guardrelay", "binary\n", 0600)
+			h.write("usr/local/bin/guardrelay", "previous binary\n", 0755)
 			h.env = append(h.env, "DEPLOY_TEST_FAIL="+action)
 			h.run(false, "update:pi", "HOST=test-host", "ARCH=arm64")
+			if action == "start" && h.read("usr/local/bin/guardrelay") != "previous binary\n" {
+				t.Fatal("failed update did not restore the previous binary")
+			}
 		})
 	}
 	for _, action := range []string{"ssh", "groupadd", "useradd", "install", "daemon-reload", "enable", "restart", "is-active", "status"} {

@@ -73,6 +73,11 @@ broker or Raspberry Pi.
 These local checks do not establish live Home Assistant acceptance or validate
 systemd hardening on a Pi; verify those on the target after deployment.
 
+GitHub Actions runs the unit/integration suite, race detector, vet, and Linux
+cross-builds for amd64, ARMv7, and ARM64. Pushing a `v*` tag runs those checks
+again and publishes the three binaries with a `SHA256SUMS` file as a GitHub
+release.
+
 ### Cross-compile for Raspberry Pi:
 
 ```bash
@@ -128,9 +133,12 @@ task update:pi HOST=pi@raspberrypi ARCH=arm64
 ```
 
 The update requires an existing installed service and the selected local binary.
-It stops the service, installs the binary, and starts the service again without
-changing configuration. Both updates and reinstalls restart the process. Energy
-counters survive graceful restarts when checkpoint storage is enabled.
+It stages the binary beside the installed one, saves the previous binary, stops
+the service, then installs and starts the update without changing configuration.
+If the updated service does not start and become active, the previous binary is
+restored and the service restart is attempted; the update still exits with an
+error so the failure is visible. Both updates and reinstalls restart the process.
+Energy counters survive graceful restarts when checkpoint storage is enabled.
 
 ### Installation on rpi-pihole (32-bit)
 
@@ -185,7 +193,7 @@ sudo journalctl -u guardrelay -f
 | `HA_DEVICE_NAME`     | Device name for HA |
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
-| `PHASE_FRESHNESS`    | Maximum phase sample age/energy integration interval, a positive Go duration (default: `10s`) |
+| `PHASE_FRESHNESS`    | Maximum phase sample age, measurement freshness, and energy integration interval, a positive Go duration (default: `10s`) |
 | `ENERGY_STATE_FILE`  | Optional local energy checkpoint path; unset/empty disables persistence. The Pi unit defaults to `/var/lib/guardrelay/energy.json`. |
 
 `MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
@@ -245,6 +253,17 @@ topics above are processed; unrelated or nested topics such as `smartpi/I1/extra
 are ignored. Numeric payloads may use a decimal point or decimal comma and retain
 their sign. Malformed payloads, NaN, and infinities are logged and rejected.
 
+### Measurement freshness
+
+The `Measurement data stale` Home Assistant diagnostic binary sensor is `ON`
+until every mapped SmartPi input has delivered a live, valid sample. It becomes
+`ON` again if any input is missing or its latest sample reaches
+`PHASE_FRESHNESS`; the relay checks for expiration at least once per second.
+Retained MQTT replays do not count as fresh measurements. After reconnect, the
+diagnostic stays stale until all mapped inputs report again. This is separate
+from relay availability: MQTT can be online while measurement data is incomplete
+or stale.
+
 ### Power aggregation
 
 `power_total` is the signed sum of P1 + P2 + P3, published on live power updates
@@ -262,33 +281,40 @@ arrive. The `10s` default tolerates normal scheduling jitter for SmartPi's
 roughly 5-second update cadence; if it publishes less frequently, increase
 `PHASE_FRESHNESS`, for example to `30s`.
 
-### Imported energy
+### Imported and exported energy
 
-`energy_l1`-`energy_l3` accumulate estimated imported kWh for each phase.
-For consecutive live power samples less than `PHASE_FRESHNESS` apart, the relay
-uses the previous positive power:
+`energy_l1`-`energy_l3` accumulate estimated imported kWh; `energy_export_l1`-
+`energy_export_l3` accumulate estimated exported kWh. For consecutive live
+power samples less than `PHASE_FRESHNESS` apart, the relay uses the previous
+sample's direction and magnitude:
 `increment_kWh = max(previous_watts, 0) * elapsed_seconds / 3600000`.
-The first sample establishes a baseline; zero or negative previous power adds
-no imported energy. `energy_total` is the sum of the three imported counters,
-not the integral of signed net power. Each phase integrates independently.
+For export it applies the same formula to `max(-previous_watts, 0)`.
+The first sample establishes a baseline; zero power adds no energy. SmartPi's
+readout assigns nonnegative active power to consumption and negative active
+power to production ([upstream implementation](https://github.com/nDenerserve/SmartPi/blob/e6bd8fd2a9f78c163ac656388d44b7ab35f359bc/src/readout/main.go)).
+Each phase integrates independently. `energy_total` and `energy_export_total`
+sum their respective per-phase counters; they are not the integral of signed
+net power.
 
 Without `ENERGY_STATE_FILE`, counters reset to zero on every process restart.
-With checkpoint storage enabled, the saved per-phase counters are restored and
-their sum is recalculated. Initial restored or zero states are acknowledged before
-accumulation begins. Counters survive MQTT reconnects, but connection changes
-clear integration baselines. Retained replay, stale intervals, non-positive time
-intervals, and downtime do not add energy; the next live sample reestablishes the
-baseline. This intentionally undercounts during gaps rather than inventing usage.
-The estimate assumes power stays constant until the next valid sample and is
-not a replacement for a billing meter.
+With checkpoint storage enabled, both sets of saved per-phase counters are
+restored and their totals are recalculated. Existing version 1 checkpoints
+preserve imported counters and initialize exported counters to zero; they are
+rewritten in the current format. Initial restored or zero states are
+acknowledged before accumulation begins. Counters survive MQTT reconnects, but
+connection changes clear integration baselines. Retained replay, stale
+intervals, non-positive time intervals, and downtime do not add energy; the next
+live sample reestablishes the baseline. This intentionally undercounts during
+gaps rather than inventing usage. The estimates assume power stays constant
+until the next valid sample and are not a replacement for a billing meter.
 
 Energy states use kWh with Home Assistant's `total_increasing` state class and
 are retained in MQTT so discovery subscribers can obtain the latest counters,
 including the initial restored or zero values. The relay never restores counters
 from MQTT. Retained broker state is only a published snapshot, not persistence
-for the relay.
-Snapshots are republished on reconnect and live power updates; publication errors
-are logged and initialization cannot announce online if its energy snapshot fails.
+for the relay. Snapshots are republished on reconnect and live power updates;
+publication errors are logged and initialization cannot announce online if its
+energy snapshot fails.
 
 ### Energy checkpoints
 
@@ -306,7 +332,7 @@ synchronizes the directory. The file does not grow over time; temporary files
 from successful saves are not retained. An abrupt kill during a save can leave
 a small temporary file, which is not used for restoration.
 
-Only per-phase imported-energy counters and their meter identity are saved.
+Per-phase imported/exported energy counters and their meter identity are saved.
 Phase readings and timestamps are never restored, so downtime cannot be
 backfilled. Corrupt, incompatible, or differently identified checkpoints fail
 startup instead of silently resetting counters. Checkpoint write failures stop

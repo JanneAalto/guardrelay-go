@@ -40,6 +40,7 @@ func TestCheckpointRoundTripAndUnchangedWrites(t *testing.T) {
 		t.Fatalf("missing checkpoint should start at zero: %v", err)
 	}
 	r.energy = [3]float64{1.2345678901234567, 2, 3}
+	r.exportedEnergy = [3]float64{4, 5, 6}
 	if err := r.saveCheckpoint(); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,8 @@ func TestCheckpointRoundTripAndUnchangedWrites(t *testing.T) {
 	if err := restarted.restoreCheckpoint(); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.energy != r.energy || restarted.phases != [3]phaseSample{} || restarted.energyReady {
+	if restarted.energy != r.energy || restarted.exportedEnergy != r.exportedEnergy ||
+		restarted.phases != [3]phaseSample{} || restarted.energyReady {
 		t.Fatal("restore lost precision or restored baselines/readiness")
 	}
 	restarted.now = func() time.Time { return old }
@@ -83,6 +85,71 @@ func TestCheckpointRoundTripAndUnchangedWrites(t *testing.T) {
 	}
 }
 
+func TestCheckpointMigratesImportedOnlyVersionOne(t *testing.T) {
+	r := checkpointRelay(t)
+	state := map[string]any{
+		"version": 1, "device_id": r.cfg.HADeviceID, "smartpi_prefix": r.cfg.SmartPiPrefix,
+		"base_topic": r.cfg.MQTTBaseTopic, "imported_kwh": []float64{1, 2, 3},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(r.cfg.EnergyStateFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.cfg.EnergyStateFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.restoreCheckpoint(); err != nil {
+		t.Fatal(err)
+	}
+	if r.energy != [3]float64{1, 2, 3} || r.exportedEnergy != [3]float64{} {
+		t.Fatalf("version 1 counters were not migrated: imported=%v exported=%v", r.energy, r.exportedEnergy)
+	}
+	if err := r.saveCheckpoint(); err != nil {
+		t.Fatal(err)
+	}
+	migrated := readCheckpoint(t, r.cfg.EnergyStateFile)
+	if migrated.Version != 2 || len(migrated.ExportedPhases) != 3 ||
+		*migrated.ExportedPhases[0] != 0 || *migrated.ExportedPhases[1] != 0 ||
+		*migrated.ExportedPhases[2] != 0 {
+		t.Fatalf("version 1 checkpoint was not saved in the current format: %+v", migrated)
+	}
+}
+
+func TestCheckpointRejectsInvalidExportedCounters(t *testing.T) {
+	for _, exported := range []any{
+		[]float64{-1, 0, 0},
+		[]float64{math.MaxFloat64, math.MaxFloat64, 0},
+		[]any{nil, 0.0, 0.0},
+	} {
+		r := checkpointRelay(t)
+		state := map[string]any{
+			"version": 2, "device_id": r.cfg.HADeviceID, "smartpi_prefix": r.cfg.SmartPiPrefix,
+			"base_topic": r.cfg.MQTTBaseTopic, "imported_kwh": []float64{1, 2, 3},
+			"exported_kwh": exported,
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(r.cfg.EnergyStateFile), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(r.cfg.EnergyStateFile, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		r.energy, r.exportedEnergy = [3]float64{9, 9, 9}, [3]float64{8, 8, 8}
+		if err := r.restoreCheckpoint(); err == nil {
+			t.Fatalf("invalid exported checkpoint was accepted: %s", data)
+		}
+		if r.energy != [3]float64{9, 9, 9} || r.exportedEnergy != [3]float64{8, 8, 8} {
+			t.Fatal("invalid exported checkpoint reset counters")
+		}
+	}
+}
+
 func TestCheckpointRejectsInvalidStateWithoutResetting(t *testing.T) {
 	for _, change := range []func(map[string]any){
 		func(s map[string]any) { s["version"] = 2 },
@@ -95,6 +162,7 @@ func TestCheckpointRejectsInvalidStateWithoutResetting(t *testing.T) {
 		func(s map[string]any) { s["imported_kwh"] = []float64{-1, 2, 3} },
 		func(s map[string]any) { s["imported_kwh"] = []any{nil, 2, 3} },
 		func(s map[string]any) { s["imported_kwh"] = []float64{math.MaxFloat64, math.MaxFloat64, 0} },
+		func(s map[string]any) { s["version"] = 2 },
 		func(s map[string]any) { s["unexpected"] = true },
 	} {
 		r := checkpointRelay(t)
@@ -222,7 +290,8 @@ func TestCheckpointConcurrentUpdates(t *testing.T) {
 				return
 			}
 			var state energyCheckpoint
-			if err := json.Unmarshal(data, &state); err != nil || len(state.Phases) != 3 {
+			if err := json.Unmarshal(data, &state); err != nil ||
+				len(state.Phases) != 3 || len(state.ExportedPhases) != 3 {
 				t.Errorf("reader observed an incomplete checkpoint: %v", err)
 				return
 			}
@@ -261,7 +330,8 @@ func TestCheckpointSupportsLongValidIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := newSmartPiRelay(r.cfg)
-	if err := restarted.restoreCheckpoint(); err != nil || restarted.energy != r.energy {
+	if err := restarted.restoreCheckpoint(); err != nil ||
+		restarted.energy != r.energy || restarted.exportedEnergy != r.exportedEnergy {
 		t.Fatalf("valid identity cannot round-trip through checkpoint: %v", err)
 	}
 }

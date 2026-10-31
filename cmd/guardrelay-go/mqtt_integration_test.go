@@ -16,7 +16,10 @@ import (
 	"github.com/eclipse/paho.golang/packets"
 )
 
-var wireEnergyKeys = []string{"energy_l1", "energy_l2", "energy_l3", "energy_total"}
+var wireEnergyKeys = []string{
+	"energy_l1", "energy_l2", "energy_l3", "energy_total",
+	"energy_export_l1", "energy_export_l2", "energy_export_l3", "energy_export_total",
+}
 
 type wireRelayRun struct {
 	cancel   context.CancelFunc
@@ -53,8 +56,8 @@ type wireBroker struct {
 	discovery     map[string]SensorConfig
 	deleted       map[string]bool
 	availability  []string
-	energy        [4]float64
-	snapshots     [][4]float64
+	energy        [8]float64
+	snapshots     [][8]float64
 	nextEnergy    int
 	subscribed    bool
 	rejectCleanup bool
@@ -153,14 +156,14 @@ func (b *wireBroker) observe(p *packets.Publish) {
 			b.t.Fatal("initial availability was not offline")
 		}
 		if state == "online" {
-			if !b.subscribed || len(b.discovery) != 21 || len(b.deleted) != 5 {
+			if !b.subscribed || len(b.discovery) != 26 || len(b.deleted) != 5 {
 				b.t.Fatal("online preceded subscription or complete discovery migration")
 			}
 		}
 		b.availability = append(b.availability, state)
 	case strings.HasPrefix(p.Topic, b.cfg.MQTTBaseTopic+"/state/"):
 		key := strings.TrimPrefix(p.Topic, b.cfg.MQTTBaseTopic+"/state/")
-		valid := key == "power_total"
+		valid := key == "power_total" || key == measurementProblemKey
 		for _, measurement := range measurementCases {
 			valid = valid || key == measurement.key
 		}
@@ -171,18 +174,24 @@ func (b *wireBroker) observe(p *packets.Publish) {
 			b.t.Fatalf("unexpected state key: %s", key)
 		}
 		b.states[key] = append(b.states[key], string(p.Payload))
-		if strings.HasPrefix(key, "energy_") {
-			if !p.Retain || key != wireEnergyKeys[b.nextEnergy] {
+		if key == measurementProblemKey {
+			if !p.Retain || string(p.Payload) != "ON" && string(p.Payload) != "OFF" {
+				b.t.Fatalf("invalid retained measurement freshness state: %+v", p)
+			}
+		} else if strings.HasPrefix(key, "energy_") {
+			index := b.nextEnergy
+			if !p.Retain || index >= len(wireEnergyKeys) || key != wireEnergyKeys[index] {
 				b.t.Fatalf("incorrect retained energy snapshot ordering: %s", key)
 			}
 			value, err := strconv.ParseFloat(string(p.Payload), 64)
-			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < b.energy[b.nextEnergy] {
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < b.energy[index] {
 				b.t.Fatalf("invalid/nonmonotonic energy value: %q", p.Payload)
 			}
-			b.energy[b.nextEnergy] = value
-			b.nextEnergy = (b.nextEnergy + 1) % 4
+			b.energy[index] = value
+			b.nextEnergy = (index + 1) % len(wireEnergyKeys)
 			if b.nextEnergy == 0 {
-				if b.energy[3] != b.energy[0]+b.energy[1]+b.energy[2] {
+				if b.energy[3] != b.energy[0]+b.energy[1]+b.energy[2] ||
+					b.energy[7] != b.energy[4]+b.energy[5]+b.energy[6] {
 					b.t.Fatalf("energy total differs from phase counters: %v", b.energy)
 				}
 				b.snapshots = append(b.snapshots, b.energy)
@@ -190,7 +199,12 @@ func (b *wireBroker) observe(p *packets.Publish) {
 		} else if p.Retain {
 			b.t.Fatalf("instantaneous state is unexpectedly retained: %s", key)
 		}
-	case strings.HasPrefix(p.Topic, b.cfg.HADiscoveryPref+"/sensor/"):
+	case strings.HasPrefix(p.Topic, b.cfg.HADiscoveryPref+"/sensor/") ||
+		strings.HasPrefix(p.Topic, b.cfg.HADiscoveryPref+"/binary_sensor/"):
+		component := "sensor"
+		if strings.HasPrefix(p.Topic, b.cfg.HADiscoveryPref+"/binary_sensor/") {
+			component = "binary_sensor"
+		}
 		if !p.Retain {
 			b.t.Fatal("discovery configuration is not retained")
 		}
@@ -201,7 +215,7 @@ func (b *wireBroker) observe(p *packets.Publish) {
 					valid = true
 				}
 			}
-			if !valid || b.deleted[p.Topic] {
+			if component != "sensor" || !valid || b.deleted[p.Topic] {
 				b.t.Fatalf("incorrect/duplicate discovery deletion: %s", p.Topic)
 			}
 			b.deleted[p.Topic] = true
@@ -213,6 +227,9 @@ func (b *wireBroker) observe(p *packets.Publish) {
 		}
 		key := strings.TrimPrefix(sc.StateTopic, b.cfg.MQTTBaseTopic+"/state/")
 		unit, class, stateClass := "", "", "measurement"
+		if key == measurementProblemKey {
+			class, stateClass = "problem", ""
+		}
 		for _, measurement := range measurementCases {
 			if key == measurement.key {
 				unit, class = measurement.unit, measurement.deviceClass
@@ -228,7 +245,7 @@ func (b *wireBroker) observe(p *packets.Publish) {
 		}
 		if class == "" || sc.StateTopic != b.cfg.MQTTBaseTopic+"/state/"+key ||
 			sc.UniqueID != b.cfg.HADeviceID+"_"+key ||
-			p.Topic != b.cfg.HADiscoveryPref+"/sensor/"+sc.UniqueID+"/config" ||
+			p.Topic != b.cfg.HADiscoveryPref+"/"+component+"/"+sc.UniqueID+"/config" ||
 			sc.UnitOfMeasurement != unit || sc.DeviceClass != class || sc.StateClass != stateClass ||
 			sc.AvailabilityTopic != b.cfg.MQTTBaseTopic+"/status" ||
 			sc.PayloadAvailable != "online" || sc.PayloadNotAvailable != "offline" ||
@@ -246,14 +263,26 @@ func (b *wireBroker) observe(p *packets.Publish) {
 	}
 }
 
-func (b *wireBroker) ready(wantEnergy [4]float64) {
+func (b *wireBroker) ready(wantEnergy [8]float64) {
 	b.t.Helper()
 	for len(b.availability) < 2 {
 		b.read()
 	}
-	if b.availability[1] != "online" || len(b.snapshots) != 1 || b.energy != wantEnergy {
+	if b.availability[1] != "online" || len(b.snapshots) != 1 || b.energy != wantEnergy ||
+		len(b.states[measurementProblemKey]) != 1 || b.states[measurementProblemKey][0] != "ON" {
 		b.t.Fatalf("incorrect ready/reset snapshot: availability=%v energy=%v, want %v",
 			b.availability, b.energy, wantEnergy)
+	}
+}
+
+func (b *wireBroker) awaitMeasurementHealth(want string) {
+	b.t.Helper()
+	for len(b.states[measurementProblemKey]) == 0 ||
+		b.states[measurementProblemKey][len(b.states[measurementProblemKey])-1] != want {
+		b.read()
+	}
+	if got := b.states[measurementProblemKey][len(b.states[measurementProblemKey])-1]; got != want {
+		b.t.Fatalf("measurement health = %s, want %s", got, want)
 	}
 }
 
@@ -321,10 +350,11 @@ func TestRunWireMeasurementsReconnectAndRestart(t *testing.T) {
 	listener, cfg := wireListener(t)
 	r := startWireRelay(t, cfg)
 	first := acceptWireBroker(t, listener, cfg)
-	first.ready([4]float64{})
+	first.ready([8]float64{})
 	for _, measurement := range measurementCases {
 		first.measurement(measurement.input, measurement.payload, measurement.key, measurement.state, false)
 	}
+	first.awaitMeasurementHealth("OFF")
 	for _, measurement := range measurementCases {
 		if states := first.states[measurement.key]; len(states) != 1 || states[0] != measurement.state {
 			t.Fatalf("supplied measurement was overwritten: %s=%v", measurement.key, states)
@@ -368,6 +398,9 @@ func TestRunWireMeasurementsReconnectAndRestart(t *testing.T) {
 			}
 		}
 	}
+	if got := second.states[measurementProblemKey][len(second.states[measurementProblemKey])-1]; got != "ON" {
+		t.Fatalf("reconnect cleared measurement staleness without fresh samples: %s", got)
+	}
 	if states := second.states["power_total"]; len(states) != 1 || states[0] != "509.3200" {
 		t.Fatalf("live phases did not restore the correct aggregate: %v", states)
 	}
@@ -375,7 +408,7 @@ func TestRunWireMeasurementsReconnectAndRestart(t *testing.T) {
 
 	restarted := startWireRelay(t, cfg)
 	third := acceptWireBroker(t, listener, cfg)
-	third.ready([4]float64{})
+	third.ready([8]float64{})
 	for _, key := range wireEnergyKeys {
 		if states := third.states[key]; len(states) != 1 || states[0] != "0" {
 			t.Fatalf("restart did not publish exact zero: %s=%v", key, states)
@@ -428,16 +461,18 @@ func TestRunWireCheckpointSurvivesGracefulRestart(t *testing.T) {
 	cfg.EnergyStateFile = filepath.Join(t.TempDir(), "state", "energy.json")
 	r := startWireRelay(t, cfg)
 	first := acceptWireBroker(t, listener, cfg)
-	first.ready([4]float64{})
+	first.ready([8]float64{})
 	first.measurement("P1", "1000", "power_l1", "1000.0000", false)
 	first.measurement("P1", "1000", "power_l1", "1000.0000", false)
+	first.measurement("P1", "-1000", "power_l1", "-1000.0000", false)
+	first.measurement("P1", "-1000", "power_l1", "-1000.0000", false)
 	want := first.energy
-	if want[0] <= 0 {
-		t.Fatal("phase did not accumulate imported energy")
+	if want[0] <= 0 || want[4] <= 0 {
+		t.Fatal("phase did not accumulate imported and exported energy")
 	}
 	first.shutdown(r)
 	state := readCheckpoint(t, cfg.EnergyStateFile)
-	if *state.Phases[0] != want[0] {
+	if *state.Phases[0] != want[0] || *state.ExportedPhases[0] != want[4] {
 		t.Fatal("graceful shutdown did not checkpoint the latest counters")
 	}
 	restarted := startWireRelay(t, cfg)

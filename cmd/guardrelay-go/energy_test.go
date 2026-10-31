@@ -41,6 +41,25 @@ func TestEnergyIntegratesPreviousPositivePhasePower(t *testing.T) {
 	assertEnergy(t, h.relay.energy[0], 5.0/3600)
 }
 
+func TestEnergyIntegratesPreviousNegativePhasePowerAsExport(t *testing.T) {
+	h := newPowerHarness()
+	h.send("P1", "-1000", false)
+	assertEnergy(t, h.relay.exportedEnergy[0], 0)
+	h.now = h.now.Add(2 * time.Second)
+	h.send("P1", "-2000", false)
+	assertEnergy(t, h.relay.exportedEnergy[0], 2.0/3600)
+	assertEnergy(t, h.relay.energy[0], 0)
+	h.now = h.now.Add(time.Second)
+	h.send("P1", "0", false)
+	assertEnergy(t, h.relay.exportedEnergy[0], 4.0/3600)
+	h.now = h.now.Add(time.Second)
+	h.send("P1", "1000", false)
+	h.now = h.now.Add(time.Second)
+	h.send("P1", "-1000", false)
+	assertEnergy(t, h.relay.energy[0], 1.0/3600)
+	assertEnergy(t, h.relay.exportedEnergy[0], 4.0/3600)
+}
+
 func TestEnergyUsesSumOfImportedPhasesNotNetPower(t *testing.T) {
 	h := newPowerHarness()
 	h.send("P1", "1000", false)
@@ -53,12 +72,29 @@ func TestEnergyUsesSumOfImportedPhasesNotNetPower(t *testing.T) {
 	assertEnergy(t, h.relay.energy[0], 2.0/3600)
 	assertEnergy(t, h.relay.energy[1], 0)
 	assertEnergy(t, h.relay.energy[2], 4.0/3600)
-	last := h.publisher.packets[len(h.publisher.packets)-1]
-	value, err := strconv.ParseFloat(string(last.Payload), 64)
-	if err != nil || !strings.HasSuffix(last.Topic, "/energy_total") {
-		t.Fatalf("invalid total energy state: %+v", last)
+	assertEnergy(t, h.relay.exportedEnergy[1], 1.0/3600)
+	var importedTotal, exportedTotal float64
+	foundImportedTotal, foundExportedTotal := false, false
+	for _, packet := range h.publisher.packets {
+		if !strings.HasSuffix(packet.Topic, "/energy_total") &&
+			!strings.HasSuffix(packet.Topic, "/energy_export_total") {
+			continue
+		}
+		value, err := strconv.ParseFloat(string(packet.Payload), 64)
+		if err != nil {
+			t.Fatalf("invalid total energy state: %+v", packet)
+		}
+		if strings.HasSuffix(packet.Topic, "/energy_export_total") {
+			exportedTotal, foundExportedTotal = value, true
+		} else {
+			importedTotal, foundImportedTotal = value, true
+		}
 	}
-	assertEnergy(t, value, 6.0/3600)
+	if !foundImportedTotal || !foundExportedTotal {
+		t.Fatal("imported or exported energy total was not published")
+	}
+	assertEnergy(t, importedTotal, 6.0/3600)
+	assertEnergy(t, exportedTotal, 1.0/3600)
 }
 
 func TestEnergyIntervalBoundariesAndRebaselining(t *testing.T) {
@@ -162,12 +198,15 @@ func TestEnergyStartupAndRestartPublishZeroBeforeAccumulation(t *testing.T) {
 			t.Fatal(err)
 		}
 		ops, _ := publisher.snapshot()
-		for i, key := range []string{"energy_l1", "energy_l2", "energy_l3", "energy_total"} {
+		for i, key := range []string{
+			"energy_l1", "energy_l2", "energy_l3", "energy_total",
+			"energy_export_l1", "energy_export_l2", "energy_export_l3", "energy_export_total",
+		} {
 			if ops[i+1] != cfg.MQTTBaseTopic+"/state/"+key+"=0" {
 				t.Fatalf("run %d did not publish startup zero: %v", run, ops[:6])
 			}
 		}
-		if relay.energy != [3]float64{} || !relay.energyReady {
+		if relay.energy != [3]float64{} || relay.exportedEnergy != [3]float64{} || !relay.energyReady {
 			t.Fatal("new process restored old counters or failed to initialize energy")
 		}
 		now := time.Unix(1000, 0)
@@ -184,18 +223,18 @@ func TestEnergyStartupAndRestartPublishZeroBeforeAccumulation(t *testing.T) {
 func TestEnergySnapshotsAreRetainedFiniteAndConsistent(t *testing.T) {
 	h := newPowerHarness()
 	h.relay.cfg.MQTTBaseTopic = "custom/relay"
-	var previous [4]float64
+	var previous [8]float64
 	for cycle := 0; cycle < 10; cycle++ {
 		for phase := 1; phase <= 3; phase++ {
 			h.now = h.now.Add(time.Millisecond)
 			h.send(fmt.Sprintf("P%d", phase), fmt.Sprint(phase*1000), false)
-			packets := h.publisher.packets[len(h.publisher.packets)-4:]
-			var values [4]float64
+			packets := h.publisher.packets[len(h.publisher.packets)-8:]
+			var values [8]float64
 			for i, packet := range packets {
-				key := "energy_total"
-				if i < 3 {
-					key = fmt.Sprintf("energy_l%d", i+1)
-				}
+				key := []string{
+					"energy_l1", "energy_l2", "energy_l3", "energy_total",
+					"energy_export_l1", "energy_export_l2", "energy_export_l3", "energy_export_total",
+				}[i]
 				value, err := strconv.ParseFloat(string(packet.Payload), 64)
 				if err != nil || math.IsNaN(value) || math.IsInf(value, 0) ||
 					packet.Topic != "custom/relay/state/"+key || !packet.Retain || packet.QoS != 1 ||
@@ -204,8 +243,9 @@ func TestEnergySnapshotsAreRetainedFiniteAndConsistent(t *testing.T) {
 				}
 				values[i] = value
 			}
-			if values[3] != values[0]+values[1]+values[2] {
-				t.Fatalf("total differs from phase counters: %v", values)
+			if values[3] != values[0]+values[1]+values[2] ||
+				values[7] != values[4]+values[5]+values[6] {
+				t.Fatalf("energy totals differ from phase counters: %v", values)
 			}
 			previous = values
 		}
@@ -222,7 +262,8 @@ func TestEnergyDoesNotAccumulateUntilStartupZeroIsAcknowledged(t *testing.T) {
 	now := h.now
 	h.relay.recordPower(context.Background(), 0, 1000, now)
 	h.relay.recordPower(context.Background(), 0, 1000, now.Add(time.Second))
-	if h.relay.energyReady || h.relay.energy != [3]float64{} {
+	if h.relay.energyReady || h.relay.energy != [3]float64{} ||
+		h.relay.exportedEnergy != [3]float64{} {
 		t.Fatal("accumulated before startup zero snapshot was acknowledged")
 	}
 	publisher.failPrefix = ""
@@ -242,17 +283,28 @@ func TestEnergyLargeFiniteIncrementAndCounterOverflow(t *testing.T) {
 	if math.IsInf(h.relay.energy[0], 0) || math.Abs(h.relay.energy[0]/want-1) > 1e-14 {
 		t.Fatal("a finite increment overflowed during intermediate multiplication")
 	}
-	for _, phase := range []int{0, 1} {
-		t.Run(fmt.Sprintf("overflow phase %d", phase+1), func(t *testing.T) {
-			h := newPowerHarness()
-			h.relay.energyReady = true
-			h.relay.energy[0] = math.MaxFloat64
-			h.relay.recordPower(context.Background(), phase, 1e308, h.now)
-			err := h.relay.recordPower(context.Background(), phase, 1e308, h.now.Add(2*time.Second))
-			if err == nil || h.relay.energy != [3]float64{math.MaxFloat64, 0, 0} {
-				t.Fatal("phase or summed counter overflow was not rejected atomically")
-			}
-		})
+	for _, exported := range []bool{false, true} {
+		for _, phase := range []int{0, 1} {
+			t.Run(fmt.Sprintf("exported=%v/phase=%d", exported, phase+1), func(t *testing.T) {
+				h := newPowerHarness()
+				h.relay.energyReady = true
+				power := 1e308
+				wantImported, wantExported := [3]float64{}, [3]float64{}
+				if exported {
+					h.relay.exportedEnergy[0] = math.MaxFloat64
+					wantExported[0] = math.MaxFloat64
+					power = -power
+				} else {
+					h.relay.energy[0] = math.MaxFloat64
+					wantImported[0] = math.MaxFloat64
+				}
+				h.relay.recordPower(context.Background(), phase, power, h.now)
+				err := h.relay.recordPower(context.Background(), phase, power, h.now.Add(2*time.Second))
+				if err == nil || h.relay.energy != wantImported || h.relay.exportedEnergy != wantExported {
+					t.Fatal("phase or summed counter overflow was not rejected atomically")
+				}
+			})
+		}
 	}
 }
 
@@ -328,7 +380,7 @@ func TestEnergySnapshotPublicationIsSerializedWithoutBlockingReset(t *testing.T)
 			t.Fatal("energy publication did not finish")
 		}
 	}
-	if len(publisher.packets) != 8 {
+	if len(publisher.packets) != 16 {
 		t.Fatalf("incomplete snapshots: %d packets", len(publisher.packets))
 	}
 	for i, packet := range publisher.packets {
@@ -337,7 +389,7 @@ func TestEnergySnapshotPublicationIsSerializedWithoutBlockingReset(t *testing.T)
 			t.Fatal(err)
 		}
 		want := 0.0
-		if i == 4 || i == 7 {
+		if i == 8 || i == 11 {
 			want = 2.0 / 3600
 		}
 		assertEnergy(t, value, want)
