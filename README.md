@@ -105,7 +105,7 @@ sudo journalctl -u guardrelay -f
 | `HA_DEVICE_NAME`     | Device name for HA |
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
-| `PHASE_FRESHNESS`    | Maximum phase sample age/energy interval, a positive Go duration (default: `3s`; calculation enforcement is added in the calculation fixes) |
+| `PHASE_FRESHNESS`    | Maximum phase sample age, a positive Go duration (default: `3s`) |
 
 `MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
 an explicit port, for example `mqtt://192.168.1.10:1883` or
@@ -164,14 +164,31 @@ topics above are processed; unrelated or nested topics such as `smartpi/I1/extra
 are ignored. Numeric payloads may use a decimal point or decimal comma and retain
 their sign. Malformed payloads, NaN, and infinities are logged and rejected.
 
-`power_total` remains the sum of P1 + P2 + P3. Power freshness and cumulative
-imported-energy corrections are separate calculation fixes; the existing energy
-calculation is not yet a reliable cumulative meter.
+### Power aggregation
+
+`power_total` is the signed sum of P1 + P2 + P3, published on live power updates
+only when all three phases have been received and each is younger than
+`PHASE_FRESHNESS` (default `3s`). Each phase has its own receipt timestamp.
+Repeated updates reuse the other phases' latest fresh values instead of requiring
+a new three-message batch. Missing/stale phases and non-finite sums suppress the
+total; phase readings continue to be forwarded individually. Suppression does not
+clear the last value already displayed in Home Assistant.
+
+Disconnect/reconnect clears phase samples. Retained power messages are forwarded
+as individual phase states but are excluded from aggregation because their
+measurement times are unknown. Aggregation resumes after all three live phases
+arrive. If SmartPi publishes less frequently than every three seconds, increase
+`PHASE_FRESHNESS`, for example to `30s`.
+
+The broken energy calculation has been removed. `energy_l1`-`energy_l3` and
+`energy_total` discovery entities are temporarily withdrawn until the cumulative
+imported-energy calculation is added in the next part.
 
 ### Discovery migration
 
 On each connection, the relay removes retained discovery configurations for
-`current_total`, `voltage_total`, and `phase_angle_l1`-`phase_angle_l3`, then
+`current_total`, `voltage_total`, `phase_angle_l1`-`phase_angle_l3`, and the
+temporarily disabled `energy_l1`-`energy_l3`/`energy_total`, then
 publishes the corrected entities. Cleanup uses the configured `HA_DEVICE_ID` and
 `HA_DISCOVERY_PREFIX`; it does not remove entities belonging to other devices.
 

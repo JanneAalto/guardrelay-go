@@ -87,14 +87,17 @@ type mqttLifecycle struct {
 	done      chan struct{}
 	mu        sync.Mutex
 	cancel    context.CancelFunc
+	connCtx   context.Context
 	connected bool
 	receiveMu sync.Mutex
+	relay     *smartPiRelay
 }
 
 func newMQTTLifecycle(ctx context.Context, cfg *Config) *mqttLifecycle {
 	l := &mqttLifecycle{
 		ctx: ctx, cfg: cfg, events: make(chan connectionEvent, 1),
 		errs: make(chan error, 1), done: make(chan struct{}),
+		relay: newSmartPiRelay(cfg),
 	}
 	go l.work()
 	return l
@@ -110,8 +113,10 @@ func (l *mqttLifecycle) connectionUp(client mqttSubscriber) {
 	if l.cancel != nil {
 		l.cancel()
 	}
+	l.relay.resetPhases()
 	ctx, cancel := context.WithCancel(l.ctx)
 	l.cancel = cancel
+	l.connCtx = ctx
 	// Only the newest connection needs initialization; one worker serializes it.
 	select {
 	case <-l.events:
@@ -127,6 +132,7 @@ func (l *mqttLifecycle) connectionDown() {
 		l.cancel()
 	}
 	l.connected = false
+	l.relay.resetPhases()
 }
 
 func (l *mqttLifecycle) work() {
@@ -164,7 +170,18 @@ func (l *mqttLifecycle) receive(pr paho.PublishReceived) (bool, error) {
 	if pr.Packet == nil || pr.Client == nil {
 		return false, fmt.Errorf("MQTT receive callback is missing its packet or client")
 	}
-	handleSmartPi(pr.Packet, l.cfg, l.ctx, pr.Client)
+	l.mu.Lock()
+	ctx := l.connCtx
+	l.mu.Unlock()
+	if ctx == nil {
+		ctx = l.ctx
+	}
+	select {
+	case <-pr.Client.Done():
+		return false, nil
+	default:
+	}
+	l.relay.handleSmartPi(pr.Packet, ctx, pr.Client)
 	return true, nil
 }
 

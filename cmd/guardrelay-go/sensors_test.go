@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eclipse/paho.golang/paho"
 )
@@ -43,12 +44,6 @@ func (p *sensorPublisher) Publish(_ context.Context, packet *paho.Publish) (*pah
 	return &paho.PublishResponse{}, p.err
 }
 
-func resetCalculationState(t *testing.T) {
-	t.Helper()
-	tot, lastTotals = totals{}, totals{}
-	t.Cleanup(func() { tot, lastTotals = totals{}, totals{} })
-}
-
 func captureSensorLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var output bytes.Buffer
@@ -62,13 +57,13 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 	for _, prefix := range []string{"smartpi", "meters/device/smartpi"} {
 		for _, tt := range measurementCases {
 			t.Run(prefix+"/"+tt.input, func(t *testing.T) {
-				resetCalculationState(t)
 				cfg := testConfig()
 				cfg.SmartPiPrefix, cfg.MQTTBaseTopic = prefix, "custom/relay"
+				relay := newSmartPiRelay(cfg)
 				publisher := &sensorPublisher{}
-				handleSmartPi(&paho.Publish{
+				relay.handleSmartPi(&paho.Publish{
 					Topic: prefix + "/" + tt.input, Payload: []byte(tt.payload),
-				}, cfg, context.Background(), publisher)
+				}, context.Background(), publisher)
 				if len(publisher.packets) != 1 {
 					t.Fatalf("expected exactly one phase output, got %d", len(publisher.packets))
 				}
@@ -79,15 +74,15 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 				}
 				if strings.HasPrefix(tt.input, "P") {
 					index := int(tt.input[1] - '1')
-					if tot.p[index] == nil || tot.lastTS.IsZero() {
-						t.Fatal("power routing did not update its existing calculation phase")
+					if relay.phases[index].receivedAt.IsZero() {
+						t.Fatal("power routing did not update its calculation phase")
 					}
-					for other := range tot.p {
-						if other != index && tot.p[other] != nil {
+					for other := range relay.phases {
+						if other != index && !relay.phases[other].receivedAt.IsZero() {
 							t.Fatal("power routing updated the wrong phase")
 						}
 					}
-				} else if !tot.lastTS.IsZero() {
+				} else if relay.phases != [3]phaseSample{} {
 					t.Fatal("non-power measurement changed power samples")
 				}
 			})
@@ -96,12 +91,14 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 }
 
 func TestSmartPiSuppliedSequencePreservesPhasePowerTotal(t *testing.T) {
-	resetCalculationState(t)
+	relay := newSmartPiRelay(testConfig())
+	now := time.Unix(1000, 0)
+	relay.now = func() time.Time { return now }
 	publisher := &sensorPublisher{}
 	for _, measurement := range measurementCases {
-		handleSmartPi(&paho.Publish{
+		relay.handleSmartPi(&paho.Publish{
 			Topic: "smartpi/" + measurement.input, Payload: []byte(measurement.payload),
-		}, testConfig(), context.Background(), publisher)
+		}, context.Background(), publisher)
 	}
 	byKey := make(map[string][]string)
 	for _, packet := range publisher.packets {
@@ -127,10 +124,10 @@ func TestSmartPiNumericPayloads(t *testing.T) {
 		{"-1.25", "-1.2500"},
 	} {
 		t.Run(tt.payload, func(t *testing.T) {
-			resetCalculationState(t)
+			relay := newSmartPiRelay(testConfig())
 			publisher := &sensorPublisher{}
-			handleSmartPi(&paho.Publish{Topic: "smartpi/I1", Payload: []byte(tt.payload)},
-				testConfig(), context.Background(), publisher)
+			relay.handleSmartPi(&paho.Publish{Topic: "smartpi/I1", Payload: []byte(tt.payload)},
+				context.Background(), publisher)
 			if len(publisher.packets) != 1 || string(publisher.packets[0].Payload) != tt.want {
 				t.Fatalf("unexpected numeric output: %+v", publisher.packets)
 			}
@@ -141,12 +138,12 @@ func TestSmartPiNumericPayloads(t *testing.T) {
 func TestSmartPiRejectsMalformedAndNonFinitePayloads(t *testing.T) {
 	for _, payload := range []string{"", " \t", "bad", "--1", "1,2,3", "NaN", "+Inf", "-Inf", "Infinity", "1e309"} {
 		t.Run(payload, func(t *testing.T) {
-			resetCalculationState(t)
+			relay := newSmartPiRelay(testConfig())
 			output := captureSensorLogs(t)
 			publisher := &sensorPublisher{}
-			handleSmartPi(&paho.Publish{Topic: "smartpi/P1", Payload: []byte(payload)},
-				testConfig(), context.Background(), publisher)
-			if len(publisher.packets) != 0 || tot.p[0] != nil || !tot.lastTS.IsZero() {
+			relay.handleSmartPi(&paho.Publish{Topic: "smartpi/P1", Payload: []byte(payload)},
+				context.Background(), publisher)
+			if len(publisher.packets) != 0 || relay.phases != [3]phaseSample{} {
 				t.Fatal("invalid measurement was published or entered calculation state")
 			}
 			if !strings.Contains(output.String(), "not a finite number") ||
@@ -158,10 +155,10 @@ func TestSmartPiRejectsMalformedAndNonFinitePayloads(t *testing.T) {
 }
 
 func TestSmartPiIgnoresUnsupportedTopicsBeforeParsing(t *testing.T) {
-	resetCalculationState(t)
 	output := captureSensorLogs(t)
 	cfg := testConfig()
 	cfg.SmartPiPrefix = "meters/smartpi"
+	relay := newSmartPiRelay(cfg)
 	for _, topic := range []string{
 		"smartpi/I1", "meters/smartpi", "meters/smartpi/", "meters/smartpi/I1/extra",
 		"meters/smartpi//I1", "meters/smartpi/COS3/extra", "meters/smartpi/status",
@@ -169,23 +166,23 @@ func TestSmartPiIgnoresUnsupportedTopicsBeforeParsing(t *testing.T) {
 		"meters/smartpi-other/I1",
 	} {
 		publisher := &sensorPublisher{}
-		handleSmartPi(&paho.Publish{Topic: topic, Payload: []byte("not a number")},
-			cfg, context.Background(), publisher)
+		relay.handleSmartPi(&paho.Publish{Topic: topic, Payload: []byte("not a number")},
+			context.Background(), publisher)
 		if len(publisher.packets) != 0 {
 			t.Fatalf("unsupported topic published state: %q", topic)
 		}
 	}
-	if output.Len() != 0 || !tot.lastTS.IsZero() {
+	if output.Len() != 0 || relay.phases != [3]phaseSample{} {
 		t.Fatalf("unrelated topics were parsed: %q", output.String())
 	}
 }
 
 func TestSmartPiPublishFailureIsLogged(t *testing.T) {
-	resetCalculationState(t)
+	relay := newSmartPiRelay(testConfig())
 	output := captureSensorLogs(t)
 	publisher := &sensorPublisher{err: errors.New("broker rejected state")}
-	handleSmartPi(&paho.Publish{Topic: "smartpi/I4", Payload: []byte("-0.78")},
-		testConfig(), context.Background(), publisher)
+	relay.handleSmartPi(&paho.Publish{Topic: "smartpi/I4", Payload: []byte("-0.78")},
+		context.Background(), publisher)
 	if !strings.Contains(output.String(), "broker rejected state") {
 		t.Fatal("state publication failure was not surfaced")
 	}
@@ -195,7 +192,7 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 	cfg := testConfig()
 	cfg.MQTTBaseTopic, cfg.HADeviceID = "custom/relay", "custom_device"
 	sensors := discoverySensors(cfg)
-	if len(sensors) != len(measurementCases)+5 {
+	if len(sensors) != len(measurementCases)+1 {
 		t.Fatalf("unexpected number of discovered sensors: %d", len(sensors))
 	}
 	byKey := make(map[string]SensorConfig)
@@ -233,15 +230,12 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 			}
 		}
 	}
-	for _, key := range []string{"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3"} {
+	for _, key := range []string{
+		"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
+		"energy_l1", "energy_l2", "energy_l3", "energy_total",
+	} {
 		if _, exists := byKey[key]; exists {
 			t.Fatalf("obsolete sensor is still discovered: %s", key)
-		}
-	}
-	for _, key := range []string{"energy_l1", "energy_l2", "energy_l3", "energy_total"} {
-		if sensor := byKey[key]; sensor.UnitOfMeasurement != "kWh" ||
-			sensor.DeviceClass != "energy" || sensor.StateClass != "total_increasing" {
-			t.Fatalf("existing energy metadata changed: %+v", sensor)
 		}
 	}
 	if sensor := byKey["power_total"]; sensor.UnitOfMeasurement != "W" ||
@@ -257,7 +251,10 @@ func TestDiscoveryMigration(t *testing.T) {
 	if err := publishDiscovery(context.Background(), cfg, publisher); err != nil {
 		t.Fatal(err)
 	}
-	oldKeys := []string{"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3"}
+	oldKeys := []string{
+		"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
+		"energy_l1", "energy_l2", "energy_l3", "energy_total",
+	}
 	if len(publisher.packets) != len(oldKeys)+len(discoverySensors(cfg)) {
 		t.Fatalf("incorrect discovery packet count: %d", len(publisher.packets))
 	}

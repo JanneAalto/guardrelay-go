@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/eclipse/paho.golang/paho"
 )
@@ -53,10 +52,6 @@ var sensorDefinitions = []sensorDefinition{
 	{"P2", "power_l2", "mdi:flash-outline", "Power L2", "W", "measurement", "power", 2},
 	{"P3", "power_l3", "mdi:flash-outline", "Power L3", "W", "measurement", "power", 3},
 	{"", "power_total", "mdi:flash-outline", "Power Total", "W", "measurement", "power", 0},
-	{"", "energy_l1", "mdi:lightning-bolt", "Energy L1", "kWh", "total_increasing", "energy", 0},
-	{"", "energy_l2", "mdi:lightning-bolt", "Energy L2", "kWh", "total_increasing", "energy", 0},
-	{"", "energy_l3", "mdi:lightning-bolt", "Energy L3", "kWh", "total_increasing", "energy", 0},
-	{"", "energy_total", "mdi:lightning-bolt", "Energy Total", "kWh", "total_increasing", "energy", 0},
 	{"COS1", "power_factor_l1", "mdi:angle-acute", "Power factor L1", "", "measurement", "power_factor", 0},
 	{"COS2", "power_factor_l2", "mdi:angle-acute", "Power factor L2", "", "measurement", "power_factor", 0},
 	{"COS3", "power_factor_l3", "mdi:angle-acute", "Power factor L3", "", "measurement", "power_factor", 0},
@@ -67,6 +62,7 @@ var sensorDefinitions = []sensorDefinition{
 
 var obsoleteSensorKeys = []string{
 	"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
+	"energy_l1", "energy_l2", "energy_l3", "energy_total",
 }
 
 func discoverySensors(cfg *Config) []SensorConfig {
@@ -121,16 +117,12 @@ func publishAvailability(ctx context.Context, cfg *Config, cm mqttPublisher, onl
 	return publish(ctx, cm, cfg.MQTTBaseTopic+"/status", []byte(state), true)
 }
 
-type totals struct {
-	p      [3]*float64
-	lastTS time.Time
-}
-
-var lastTotals totals
-
-var tot totals
-
-func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm mqttPublisher) {
+func (r *smartPiRelay) handleSmartPi(pub *paho.Publish, ctx context.Context, cm mqttPublisher) {
+	if ctx.Err() != nil {
+		return
+	}
+	receivedAt := r.now()
+	cfg := r.cfg
 	topic := pub.Topic
 	if !strings.HasPrefix(topic, cfg.SmartPiPrefix+"/") {
 		return
@@ -154,9 +146,8 @@ func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm mqttP
 		log.Printf("SmartPi payload is not a finite number: topic=%s payload=%q", topic, msg)
 		return
 	}
-	if sensor.powerPhase != 0 {
-		tot.p[sensor.powerPhase-1] = &val
-		tot.lastTS = time.Now()
+	if sensor.powerPhase != 0 && !pub.Retain {
+		r.recordPower(ctx, sensor.powerPhase-1, val, receivedAt)
 	}
 
 	stateTopic := fmt.Sprintf("%s/state/%s", cfg.MQTTBaseTopic, sensor.key)
@@ -165,40 +156,12 @@ func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm mqttP
 		log.Print(err)
 	}
 
-	if tot.p[0] != nil && tot.p[1] != nil && tot.p[2] != nil {
-		timeSince := time.Since(tot.lastTS)
-		if timeSince < 3*time.Second {
-			sum := *tot.p[0] + *tot.p[1] + *tot.p[2]
-			if !math.IsNaN(sum) && !math.IsInf(sum, 0) {
-				lastTotals = tot
-				if err := publish(
-					ctx,
-					cm,
-					cfg.MQTTBaseTopic+"/state/power_total",
-					[]byte(strconv.FormatFloat(sum, 'f', 4, 64)),
-					false,
-				); err != nil {
-					log.Print(err)
-				}
+	if sensor.powerPhase != 0 && !pub.Retain {
+		if sum, ok := r.totalPower(ctx); ok {
+			if err := publish(ctx, cm, cfg.MQTTBaseTopic+"/state/power_total",
+				[]byte(strconv.FormatFloat(sum, 'f', 4, 64)), false); err != nil {
+				log.Print(err)
 			}
-
-			// energy calculation in kWh
-			hours := timeSince.Hours()
-			energy := (*lastTotals.p[0] + *lastTotals.p[1] + *lastTotals.p[2]) * hours / 1000.0
-			if !math.IsNaN(energy) && !math.IsInf(energy, 0) {
-				if err := publish(
-					ctx,
-					cm,
-					cfg.MQTTBaseTopic+"/state/energy_total",
-					[]byte(strconv.FormatFloat(energy, 'f', 4, 64)),
-					false,
-				); err != nil {
-					log.Print(err)
-				}
-			}
-
-			// reset totals
-			tot = totals{}
 		}
 	}
 }
