@@ -38,15 +38,29 @@ Reads SmartPi MQTT measurements (e.g., `smartpi/I1 2.54`, `smartpi/P3 1802.23`) 
 - MQTT broker (e.g., Mosquitto)
 - SmartPi publishing topics like `smartpi/I1`, `smartpi/V1`, `smartpi/P1`
 - Home Assistant with MQTT integration enabled
+- [Task](https://taskfile.dev/) for the build/deployment shortcuts
+- For Pi deployment: SSH/SCP access and non-interactive sudo permission on a
+  Debian/Raspberry Pi OS host with systemd
 
 ---
 
 ## Build Instructions
 
-### Local build (Linux/amd64):
+### Native build:
 ```bash
-go mod tidy
-go build -o ./dist/guardrelay ./cmd/guardrelay
+go build -o ./dist/guardrelay ./cmd/guardrelay-go
+```
+
+### Cross-compile for Linux/amd64:
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./dist/linux-amd64/guardrelay ./cmd/guardrelay-go
+```
+
+### Development checks:
+```bash
+task test
+task vet
+go test -race ./...
 ```
 
 ### Cross-compile for Raspberry Pi:
@@ -64,8 +78,9 @@ task build:pi-arm64
 ### Deploy & Install as systemd Service
 ```bash
 # Copy binary and service files to Raspberry Pi:
-task deploy:pi-armv7 HOST=pi@raspberrypi   # For ARMv7
-task deploy:pi-armv64 HOST=pi@raspberrypi   # For ARM64
+task deploy:pi-armv7 HOST=pi@raspberrypi MQTT_URL=mqtt://192.168.1.10:1883
+# Or, for ARM64:
+task deploy:pi-arm64 HOST=pi@raspberrypi MQTT_URL=mqtt://192.168.1.10:1883
 
 # Install and enable service:
 task install:pi HOST=pi@raspberrypi
@@ -78,6 +93,34 @@ sudo systemctl restart guardrelay
 sudo systemctl enable guardrelay
 sudo systemctl status guardrelay
 ```
+
+Deployment requires both `HOST` and `MQTT_URL` before building or copying files.
+`SMARTPI_PREFIX` can optionally override `smartpi` when generating the defaults.
+The generated `dist/service/guardrelay.defaults` is mode `0600`; treat it as
+sensitive if the broker URL contains credentials. Avoid putting credentials in
+shell history; supply `MQTT_URL` through the environment instead.
+
+Installation uses `sudo -n`, creates the `guardrelay` system group/user if absent,
+and installs the binary and hardened unit. It installs the initial
+`/etc/default/guardrelay` as root-owned mode `0600` and **preserves an existing
+configuration on reinstall**. The environment file is required by the service.
+Edit it on the Pi when changing broker or sensor settings; rerunning deployment
+does not replace those settings. Uploaded files in `/tmp` are removed after
+installation. Missing files, sudo failures, and failed service activation are
+reported rather than ignored.
+
+For a binary-only update, first build the matching architecture, then:
+
+```bash
+task build:pi-arm64
+task update:pi HOST=pi@raspberrypi ARCH=arm64
+# For 32-bit Pi OS, use build:pi-armv7 and ARCH=armv7 instead.
+```
+
+The update requires an existing installed service and the selected local binary.
+It stops the service, installs the binary, and starts the service again without
+changing configuration. Both updates and reinstalls restart the process, resetting
+the in-memory energy counters.
 
 ### Systemd Management Commands
 ```bash
@@ -98,7 +141,7 @@ sudo journalctl -u guardrelay -f
 
 | Variable              | Description |
 |-----------------------|-------------|
-| `MQTT_URL`           | Broker URL (e.g., `mqtt://user:pass@192.168.1.10:1883`) |
+| `MQTT_URL`           | Required broker URL (e.g., `mqtt://192.168.1.10:1883`) |
 | `MQTT_CLIENT_ID`     | MQTT client ID (default: `guardrelay-ampguard`) |
 | `MQTT_BASE_TOPIC`    | Base topic for publishing (default: `guardrelay/ampguard`) |
 | `HA_DISCOVERY_PREFIX`| Home Assistant discovery prefix (default: `homeassistant`) |
@@ -227,15 +270,15 @@ under the previous identity must be cleaned up separately.
 ### Running Locally
 
 ```bash
-export MQTT_URL="mqtt://user:pass@192.168.1.10:1883"
+export MQTT_URL="mqtt://192.168.1.10:1883"
 export MQTT_CLIENT_ID="guardrelay-ampguard"
 export MQTT_BASE_TOPIC="guardrelay/ampguard"
 export HA_DISCOVERY_PREFIX="homeassistant"
-export HA_DEVICE_ID="chargeamps_amp_guard_ABC123"
+export HA_DEVICE_ID="chargeamps_amp_guard"
 export HA_DEVICE_NAME="Charge Amps Amp Guard"
 export SMARTPI_PREFIX="smartpi"
 
-go run ./cmd/guardrelay
+go run ./cmd/guardrelay-go
 ```
 
 ### Logs & Status

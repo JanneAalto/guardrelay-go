@@ -5,16 +5,22 @@ vars:
   BIN_NAME: guardrelay
   MAIN_PKG: ./cmd/guardrelay-go
   DIST_DIR: ./dist
-  DEFVERSION:
-    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
-  VERSION: '{{.VERSION | default .DEFVERSION}}'
-  BUILDTIME: '{{now | date "2006-01-02T15:04:05Z07:00"}}'
-  LDFLAGS: '-s -w -X main.version={{.VERSION}} -X main.buildTime={{.BUILDTIME}}'
+  LDFLAGS: '-s -w'
 
 env:
   CGO_ENABLED: '0'
 
 tasks:
+
+  test:
+    desc: "Run Go tests"
+    cmds:
+      - go test ./...
+
+  vet:
+    desc: "Run Go static analysis"
+    cmds:
+      - go vet ./...
 
   # Clean build artifacts
   clean:
@@ -26,90 +32,125 @@ tasks:
   build:pi-armv7:
     desc: "Build for Raspberry Pi ARMv7 (32-bit)"
     cmds:
-      - mkdir -p {{.DIST_DIR}}/linux-armv7
+      - mkdir -p {{.DIST_DIR | shellQuote}}/linux-armv7
       - >
         GOOS=linux GOARCH=arm GOARM=7
         go build -trimpath -ldflags "{{.LDFLAGS}}"
-        -o {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}} {{.MAIN_PKG}}
-      - file {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}}
+        -o {{.DIST_DIR | shellQuote}}/linux-armv7/{{.BIN_NAME}} {{.MAIN_PKG}}
+      - file {{.DIST_DIR | shellQuote}}/linux-armv7/{{.BIN_NAME}}
 
   # Build for Linux ARM64 (aarch64)
   build:pi-arm64:
     desc: "Build for Raspberry Pi ARM64 (64-bit)"
     cmds:
-      - mkdir -p {{.DIST_DIR}}/linux-arm64
+      - mkdir -p {{.DIST_DIR | shellQuote}}/linux-arm64
       - >
         GOOS=linux GOARCH=arm64
         go build -trimpath -ldflags "{{.LDFLAGS}}"
-        -o {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}} {{.MAIN_PKG}}
-      - file {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}}
+        -o {{.DIST_DIR | shellQuote}}/linux-arm64/{{.BIN_NAME}} {{.MAIN_PKG}}
+      - file {{.DIST_DIR | shellQuote}}/linux-arm64/{{.BIN_NAME}}
 
   # Generate systemd service and environment templates
   gen:service:
     desc: "Generate systemd service and environment templates"
-    required:
+    silent: true
+    requires:
       vars: [MQTT_URL]
+    preconditions:
+      - sh: 'test -n {{.MQTT_URL | trim | shellQuote}}'
+        msg: "MQTT_URL is required and must not be blank"
     vars:
       SERVICE_DIR: '{{.DIST_DIR}}/service'
       SMARTPI_PREFIX: '{{.SMARTPI_PREFIX | default "smartpi"}}'
     cmds:
-      - mkdir -p {{.SERVICE_DIR}}
-      - cp deploy/guardrelay.service {{.SERVICE_DIR}}/guardrelay.service
       - |
-        # ✅ Render /etc/default/guardrelay with the MQTT_URL from Task vars
-        cat > {{.SERVICE_DIR}}/guardrelay.defaults <<EOF
-        # GuardRelay environment configuration
-        MQTT_URL="{{.MQTT_URL}}"
-        MQTT_CLIENT_ID="guardrelay-ampguard"
-        MQTT_BASE_TOPIC="guardrelay/ampguard"
-        HA_DISCOVERY_PREFIX="homeassistant"
-        HA_DEVICE_ID="chargeamps_amp_guard_ABC123"
-        HA_DEVICE_NAME="Charge Amps Amp Guard"
-        SMARTPI_PREFIX="{{.SMARTPI_PREFIX}}"
-        LOG_LEVEL="info"
-        EOF
+        sh -eu -c '
+          umask 077
+          mkdir -p "$1"
+          cp deploy/guardrelay.service "$1/guardrelay.service"
+          touch "$1/guardrelay.defaults"
+          chmod 0600 "$1/guardrelay.defaults"
+        ' sh {{.SERVICE_DIR | shellQuote}}
+      - |
+        printf '%s\n' \
+          '# GuardRelay environment configuration' \
+          {{printf "MQTT_URL=%q" .MQTT_URL | shellQuote}} \
+          'MQTT_CLIENT_ID="guardrelay-ampguard"' \
+          'MQTT_BASE_TOPIC="guardrelay/ampguard"' \
+          'HA_DISCOVERY_PREFIX="homeassistant"' \
+          'HA_DEVICE_ID="chargeamps_amp_guard"' \
+          'HA_DEVICE_NAME="Charge Amps Amp Guard"' \
+          {{printf "SMARTPI_PREFIX=%q" .SMARTPI_PREFIX | shellQuote}} \
+          'LOG_LEVEL="info"' \
+          'PHASE_FRESHNESS="3s"' \
+          > {{.SERVICE_DIR | shellQuote}}/guardrelay.defaults
 
 
   # Deploy ARMv7 build and service files to Raspberry Pi
   deploy:pi-armv7:
     desc: "Deploy ARMv7 binary and service files to Raspberry Pi"
     requires:
-      vars: [HOST]
+      vars: [HOST, MQTT_URL]
+    preconditions:
+      - sh: 'test -n {{.HOST | trim | shellQuote}} && test -n {{.MQTT_URL | trim | shellQuote}}'
+        msg: "HOST and MQTT_URL are required and must not be blank"
     cmds:
       - task: build:pi-armv7
       - task: gen:service
-      - scp {{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}} {{.HOST}}:/tmp/{{.BIN_NAME}}
-      - scp {{.DIST_DIR}}/service/guardrelay.service {{.HOST}}:/tmp/guardrelay.service
-      - scp {{.DIST_DIR}}/service/guardrelay.defaults {{.HOST}}:/tmp/guardrelay.defaults
+      - scp {{.DIST_DIR | shellQuote}}/linux-armv7/{{.BIN_NAME}} {{.HOST | shellQuote}}:/tmp/{{.BIN_NAME}}
+      - scp {{.DIST_DIR | shellQuote}}/service/guardrelay.service {{.HOST | shellQuote}}:/tmp/guardrelay.service
+      - scp {{.DIST_DIR | shellQuote}}/service/guardrelay.defaults {{.HOST | shellQuote}}:/tmp/guardrelay.defaults
 
   # Deploy ARM64 build and service files to Raspberry Pi
   deploy:pi-arm64:
     desc: "Deploy ARM64 binary and service files to Raspberry Pi"
     requires:
-      vars: [HOST]
+      vars: [HOST, MQTT_URL]
+    preconditions:
+      - sh: 'test -n {{.HOST | trim | shellQuote}} && test -n {{.MQTT_URL | trim | shellQuote}}'
+        msg: "HOST and MQTT_URL are required and must not be blank"
     cmds:
       - task: build:pi-arm64
       - task: gen:service
-      - scp {{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}} {{.HOST}}:/tmp/{{.BIN_NAME}}
-      - scp {{.DIST_DIR}}/service/guardrelay.service {{.HOST}}:/tmp/guardrelay.service
-      - scp {{.DIST_DIR}}/service/guardrelay.defaults {{.HOST}}:/tmp/guardrelay.defaults
+      - scp {{.DIST_DIR | shellQuote}}/linux-arm64/{{.BIN_NAME}} {{.HOST | shellQuote}}:/tmp/{{.BIN_NAME}}
+      - scp {{.DIST_DIR | shellQuote}}/service/guardrelay.service {{.HOST | shellQuote}}:/tmp/guardrelay.service
+      - scp {{.DIST_DIR | shellQuote}}/service/guardrelay.defaults {{.HOST | shellQuote}}:/tmp/guardrelay.defaults
 
   # Install service on Raspberry Pi
   install:pi:
     desc: "Install systemd service on Raspberry Pi (requires sudo)"
     requires:
       vars: [HOST]
+    preconditions:
+      - sh: 'test -n {{.HOST | trim | shellQuote}}'
+        msg: "HOST is required and must not be blank"
     cmds:
       - |
-        ssh {{.HOST}} 'bash -s' <<'REMOTE'
+        ssh {{.HOST | shellQuote}} 'sudo -n bash -s' <<'REMOTE'
         set -euo pipefail
+        for path in /tmp/guardrelay /tmp/guardrelay.service /tmp/guardrelay.defaults; do
+          if [ ! -s "$path" ]; then
+            echo "Missing or empty deployment file: $path" >&2
+            exit 1
+          fi
+        done
+        if ! getent group guardrelay >/dev/null; then
+          groupadd --system guardrelay
+        fi
+        if ! getent passwd guardrelay >/dev/null; then
+          useradd --system --gid guardrelay --no-create-home --shell /usr/sbin/nologin guardrelay
+        fi
         install -m 0755 -o root -g root /tmp/guardrelay /usr/local/bin/guardrelay
         install -m 0644 -o root -g root /tmp/guardrelay.service /etc/systemd/system/guardrelay.service
-        install -m 0644 -o root -g root /tmp/guardrelay.defaults /etc/default/guardrelay
+        if [ ! -e /etc/default/guardrelay ]; then
+          install -m 0600 -o root -g root /tmp/guardrelay.defaults /etc/default/guardrelay
+        fi
+        rm /tmp/guardrelay /tmp/guardrelay.service /tmp/guardrelay.defaults
         systemctl daemon-reload
         systemctl enable guardrelay.service
         systemctl restart guardrelay.service
-        systemctl status guardrelay.service --no-pager -l || true
+        systemctl is-active --quiet guardrelay.service
+        systemctl status guardrelay.service --no-pager -l
         REMOTE
 
   # Update only the binary on Raspberry Pi
@@ -117,19 +158,33 @@ tasks:
     desc: "Update only the binary on Raspberry Pi"
     requires:
       vars: [HOST, ARCH]
+    preconditions:
+      - sh: 'test -n {{.HOST | trim | shellQuote}}'
+        msg: "HOST is required and must not be blank"
     cmds:
       - |
-        case "{{.ARCH}}" in
-          armv7)  SRC="{{.DIST_DIR}}/linux-armv7/{{.BIN_NAME}}";;
-          arm64)  SRC="{{.DIST_DIR}}/linux-arm64/{{.BIN_NAME}}";;
-          *) echo "ARCH must be armv7 or arm64"; exit 1;;
+        set -eu
+        case {{.ARCH | shellQuote}} in
+          armv7)  SRC={{printf "%s/linux-armv7/%s" .DIST_DIR .BIN_NAME | shellQuote}};;
+          arm64)  SRC={{printf "%s/linux-arm64/%s" .DIST_DIR .BIN_NAME | shellQuote}};;
+          *) echo "ARCH must be armv7 or arm64" >&2; exit 1;;
         esac
-      - scp $SRC {{.HOST}}:/tmp/{{.BIN_NAME}}
+        if [ ! -s "$SRC" ]; then
+          echo "Missing or empty binary: $SRC; run task build:pi-{{.ARCH}}" >&2
+          exit 1
+        fi
+        scp "$SRC" {{.HOST | shellQuote}}:/tmp/{{.BIN_NAME}}
       - |
-        ssh {{.HOST}} 'sudo bash -s' <<'REMOTE'
+        ssh {{.HOST | shellQuote}} 'sudo -n bash -s' <<'REMOTE'
         set -euo pipefail
-        systemctl stop guardrelay.service || true
+        if [ ! -s /tmp/guardrelay ]; then
+          echo "Missing or empty deployment binary: /tmp/guardrelay" >&2
+          exit 1
+        fi
+        systemctl stop guardrelay.service
         install -m 0755 -o root -g root /tmp/guardrelay /usr/local/bin/guardrelay
+        rm /tmp/guardrelay
         systemctl start guardrelay.service
-        systemctl status guardrelay.service --no-pager -l || true
+        systemctl is-active --quiet guardrelay.service
+        systemctl status guardrelay.service --no-pager -l
         REMOTE
