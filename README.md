@@ -63,6 +63,16 @@ task vet
 go test -race ./...
 ```
 
+The MQTT integration tests run the real Paho client/relay against a disposable
+loopback protocol peer, including the supplied measurements, discovery,
+reconnects, counter resets, and graceful shutdown. Deployment tests use local
+command stubs and temporary directories; they require Task and bash and report
+a skip if either is unavailable. Neither test suite contacts your configured
+broker or Raspberry Pi.
+
+These local checks do not establish live Home Assistant acceptance or validate
+systemd hardening on a Pi; verify those on the target after deployment.
+
 ### Cross-compile for Raspberry Pi:
 
 ```bash
