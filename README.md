@@ -34,7 +34,7 @@ Reads SmartPi MQTT measurements (e.g., `smartpi/I1 2.54`, `smartpi/P3 1802.23`) 
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.27.3+
 - MQTT broker (e.g., Mosquitto)
 - SmartPi publishing topics like `smartpi/I1`, `smartpi/V1`, `smartpi/P1`
 - Home Assistant with MQTT integration enabled
