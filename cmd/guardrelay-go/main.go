@@ -52,6 +52,10 @@ var sensorDefinitions = []sensorDefinition{
 	{"P2", "power_l2", "mdi:flash-outline", "Power L2", "W", "measurement", "power", 2},
 	{"P3", "power_l3", "mdi:flash-outline", "Power L3", "W", "measurement", "power", 3},
 	{"", "power_total", "mdi:flash-outline", "Power Total", "W", "measurement", "power", 0},
+	{"", "energy_l1", "mdi:lightning-bolt", "Imported energy L1", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_l2", "mdi:lightning-bolt", "Imported energy L2", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_l3", "mdi:lightning-bolt", "Imported energy L3", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_total", "mdi:lightning-bolt", "Imported energy total", "kWh", "total_increasing", "energy", 0},
 	{"COS1", "power_factor_l1", "mdi:angle-acute", "Power factor L1", "", "measurement", "power_factor", 0},
 	{"COS2", "power_factor_l2", "mdi:angle-acute", "Power factor L2", "", "measurement", "power_factor", 0},
 	{"COS3", "power_factor_l3", "mdi:angle-acute", "Power factor L3", "", "measurement", "power_factor", 0},
@@ -62,7 +66,6 @@ var sensorDefinitions = []sensorDefinition{
 
 var obsoleteSensorKeys = []string{
 	"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
-	"energy_l1", "energy_l2", "energy_l3", "energy_total",
 }
 
 func discoverySensors(cfg *Config) []SensorConfig {
@@ -147,7 +150,9 @@ func (r *smartPiRelay) handleSmartPi(pub *paho.Publish, ctx context.Context, cm 
 		return
 	}
 	if sensor.powerPhase != 0 && !pub.Retain {
-		r.recordPower(ctx, sensor.powerPhase-1, val, receivedAt)
+		if err := r.recordPower(ctx, sensor.powerPhase-1, val, receivedAt); err != nil {
+			log.Print(err)
+		}
 	}
 
 	stateTopic := fmt.Sprintf("%s/state/%s", cfg.MQTTBaseTopic, sensor.key)
@@ -162,6 +167,9 @@ func (r *smartPiRelay) handleSmartPi(pub *paho.Publish, ctx context.Context, cm 
 				[]byte(strconv.FormatFloat(sum, 'f', 4, 64)), false); err != nil {
 				log.Print(err)
 			}
+		}
+		if err := r.publishEnergy(ctx, cm); err != nil {
+			log.Print(err)
 		}
 	}
 }

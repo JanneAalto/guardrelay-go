@@ -64,8 +64,12 @@ func TestSmartPiMeasurementMapping(t *testing.T) {
 				relay.handleSmartPi(&paho.Publish{
 					Topic: prefix + "/" + tt.input, Payload: []byte(tt.payload),
 				}, context.Background(), publisher)
-				if len(publisher.packets) != 1 {
-					t.Fatalf("expected exactly one phase output, got %d", len(publisher.packets))
+				wantPackets := 1
+				if strings.HasPrefix(tt.input, "P") {
+					wantPackets += 4
+				}
+				if len(publisher.packets) != wantPackets {
+					t.Fatalf("expected phase state and any energy snapshot, got %d packets", len(publisher.packets))
 				}
 				packet := publisher.packets[0]
 				if packet.Topic != cfg.MQTTBaseTopic+"/state/"+tt.key ||
@@ -192,7 +196,7 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 	cfg := testConfig()
 	cfg.MQTTBaseTopic, cfg.HADeviceID = "custom/relay", "custom_device"
 	sensors := discoverySensors(cfg)
-	if len(sensors) != len(measurementCases)+1 {
+	if len(sensors) != len(measurementCases)+5 {
 		t.Fatalf("unexpected number of discovered sensors: %d", len(sensors))
 	}
 	byKey := make(map[string]SensorConfig)
@@ -232,10 +236,15 @@ func TestDiscoveryMeasurementMetadata(t *testing.T) {
 	}
 	for _, key := range []string{
 		"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
-		"energy_l1", "energy_l2", "energy_l3", "energy_total",
 	} {
 		if _, exists := byKey[key]; exists {
 			t.Fatalf("obsolete sensor is still discovered: %s", key)
+		}
+	}
+	for _, key := range []string{"energy_l1", "energy_l2", "energy_l3", "energy_total"} {
+		if sensor := byKey[key]; sensor.UnitOfMeasurement != "kWh" ||
+			sensor.DeviceClass != "energy" || sensor.StateClass != "total_increasing" {
+			t.Fatalf("incorrect imported energy metadata: %+v", sensor)
 		}
 	}
 	if sensor := byKey["power_total"]; sensor.UnitOfMeasurement != "W" ||
@@ -253,7 +262,6 @@ func TestDiscoveryMigration(t *testing.T) {
 	}
 	oldKeys := []string{
 		"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
-		"energy_l1", "energy_l2", "energy_l3", "energy_total",
 	}
 	if len(publisher.packets) != len(oldKeys)+len(discoverySensors(cfg)) {
 		t.Fatalf("incorrect discovery packet count: %d", len(publisher.packets))
@@ -285,7 +293,7 @@ func TestDiscoveryMigration(t *testing.T) {
 func TestDiscoveryMigrationFailureStopsInitialization(t *testing.T) {
 	cfg, publisher := testConfig(), newFakeMQTT()
 	publisher.failPrefix = cfg.HADiscoveryPref + "/sensor/" + cfg.HADeviceID + "_current_total/"
-	if err := initializeMQTT(context.Background(), cfg, publisher); err == nil {
+	if err := initializeMQTT(context.Background(), cfg, publisher, newSmartPiRelay(cfg)); err == nil {
 		t.Fatal("retained cleanup failure was ignored")
 	}
 	ops, _ := publisher.snapshot()

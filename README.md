@@ -26,6 +26,7 @@ Reads SmartPi MQTT measurements (e.g., `smartpi/I1 2.54`, `smartpi/P3 1802.23`) 
 - Subscribes to: `smartpi/#`
 - Publishes current, voltage, power, power factor, and frequency under `guardrelay/ampguard/state/<key>`
 - Calculates `power_total = P1+P2+P3`
+- Estimates per-phase and total imported kWh in memory; counters reset on restart
 - LWT/availability: `guardrelay/ampguard/status` (`online`/`offline`)
 - Home Assistant MQTT discovery (`homeassistant/sensor/<unique_id>/config`, retain)
 
@@ -105,7 +106,7 @@ sudo journalctl -u guardrelay -f
 | `HA_DEVICE_NAME`     | Device name for HA |
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
-| `PHASE_FRESHNESS`    | Maximum phase sample age, a positive Go duration (default: `3s`) |
+| `PHASE_FRESHNESS`    | Maximum phase sample age/energy integration interval, a positive Go duration (default: `3s`) |
 
 `MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
 an explicit port, for example `mqtt://192.168.1.10:1883` or
@@ -180,15 +181,39 @@ measurement times are unknown. Aggregation resumes after all three live phases
 arrive. If SmartPi publishes less frequently than every three seconds, increase
 `PHASE_FRESHNESS`, for example to `30s`.
 
-The broken energy calculation has been removed. `energy_l1`-`energy_l3` and
-`energy_total` discovery entities are temporarily withdrawn until the cumulative
-imported-energy calculation is added in the next part.
+### Imported energy
+
+`energy_l1`-`energy_l3` accumulate estimated imported kWh for each phase.
+For consecutive live power samples less than `PHASE_FRESHNESS` apart, the relay
+uses the previous positive power:
+`increment_kWh = max(previous_watts, 0) * elapsed_seconds / 3600000`.
+The first sample establishes a baseline; zero or negative previous power adds
+no imported energy. `energy_total` is the sum of the three imported counters,
+not the integral of signed net power. Each phase integrates independently.
+
+Counters reset to zero on every process restart, and zero states are published
+before accumulation begins. They survive MQTT reconnects, but connection changes
+clear integration baselines. Retained replay, stale intervals, non-positive time
+intervals, and downtime do not add energy; the next live sample reestablishes the
+baseline. This intentionally undercounts during gaps rather than inventing usage.
+The estimate assumes power stays constant until the next valid sample and is
+not a replacement for a billing meter.
+
+Energy states use kWh with Home Assistant's `total_increasing` state class and
+are retained in MQTT so discovery subscribers can obtain the latest counters,
+including startup zeros. The relay never restores counters from MQTT. Retained
+broker state is only a published snapshot, not persistence for the relay.
+Snapshots are republished on reconnect and live power updates; publication errors
+are logged and initialization cannot announce online if its energy snapshot fails.
+
+There are no energy state files or checkpoint writes on the Raspberry Pi SD card.
+Normal OS/journal logging and any persistence configured on the MQTT broker are
+separate from this relay's in-memory counters.
 
 ### Discovery migration
 
 On each connection, the relay removes retained discovery configurations for
-`current_total`, `voltage_total`, `phase_angle_l1`-`phase_angle_l3`, and the
-temporarily disabled `energy_l1`-`energy_l3`/`energy_total`, then
+`current_total`, `voltage_total`, and `phase_angle_l1`-`phase_angle_l3`, then
 publishes the corrected entities. Cleanup uses the configured `HA_DEVICE_ID` and
 `HA_DISCOVERY_PREFIX`; it does not remove entities belonging to other devices.
 

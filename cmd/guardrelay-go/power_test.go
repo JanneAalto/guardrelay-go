@@ -70,7 +70,7 @@ func TestPowerAggregationRequiresEveryPhase(t *testing.T) {
 	h.send("P1", "150", false)
 	h.send("P2", "200", false)
 	h.send("P2", "250", false)
-	if len(h.totals()) != 0 || len(h.publisher.packets) != 4 {
+	if len(h.totals()) != 0 || len(h.publisher.packets) != 20 {
 		t.Fatal("repeated phases substituted for a missing phase")
 	}
 }

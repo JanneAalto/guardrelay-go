@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -14,22 +15,42 @@ type phaseSample struct {
 }
 
 type smartPiRelay struct {
-	cfg    *Config
-	now    func() time.Time
-	mu     sync.Mutex
-	phases [3]phaseSample
+	cfg             *Config
+	now             func() time.Time
+	mu              sync.Mutex
+	phases          [3]phaseSample
+	energy          [3]float64
+	energyReady     bool
+	energyPublishMu sync.Mutex
 }
 
 func newSmartPiRelay(cfg *Config) *smartPiRelay {
 	return &smartPiRelay{cfg: cfg, now: time.Now}
 }
 
-func (r *smartPiRelay) recordPower(ctx context.Context, phase int, value float64, receivedAt time.Time) {
+func (r *smartPiRelay) recordPower(ctx context.Context, phase int, value float64, receivedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ctx.Err() == nil {
-		r.phases[phase] = phaseSample{value: value, receivedAt: receivedAt}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	previous := r.phases[phase]
+	r.phases[phase] = phaseSample{value: value, receivedAt: receivedAt}
+	elapsed := receivedAt.Sub(previous.receivedAt)
+	// An acknowledged zero snapshot must signal the session reset before accumulation.
+	if !r.energyReady || previous.receivedAt.IsZero() || elapsed <= 0 || elapsed >= r.cfg.PhaseFreshness {
+		return nil
+	}
+	// Divide time first so a finite kWh increment does not overflow in watts-seconds.
+	increment := math.Max(previous.value, 0) * (elapsed.Seconds() / 3600000)
+	next := r.energy
+	next[phase] += increment
+	total := next[0] + next[1] + next[2]
+	if math.IsNaN(total) || math.IsInf(total, 0) {
+		return fmt.Errorf("SmartPi imported energy for phase %d would overflow; counters unchanged", phase+1)
+	}
+	r.energy = next
+	return nil
 }
 
 func (r *smartPiRelay) resetPhases() {

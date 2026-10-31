@@ -50,8 +50,11 @@ func publish(ctx context.Context, client mqttPublisher, topic string, payload []
 	return nil
 }
 
-func initializeMQTT(ctx context.Context, cfg *Config, client mqttSubscriber) error {
+func initializeMQTT(ctx context.Context, cfg *Config, client mqttSubscriber, relay *smartPiRelay) error {
 	if err := publishAvailability(ctx, cfg, client, false); err != nil {
+		return err
+	}
+	if err := relay.publishEnergy(ctx, client); err != nil {
 		return err
 	}
 	subCtx, cancel := context.WithTimeout(ctx, mqttOperationTimeout)
@@ -145,7 +148,7 @@ func (l *mqttLifecycle) work() {
 			if event.ctx.Err() != nil {
 				continue
 			}
-			err := initializeMQTT(event.ctx, l.cfg, event.client)
+			err := initializeMQTT(event.ctx, l.cfg, event.client, l.relay)
 			if event.ctx.Err() != nil {
 				continue
 			}

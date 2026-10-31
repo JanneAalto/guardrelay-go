@@ -132,16 +132,16 @@ func TestPublishCanceledContext(t *testing.T) {
 
 func TestInitializeMQTTOrdering(t *testing.T) {
 	cfg, f := testConfig(), newFakeMQTT()
-	if err := initializeMQTT(context.Background(), cfg, f); err != nil {
+	if err := initializeMQTT(context.Background(), cfg, f, newSmartPiRelay(cfg)); err != nil {
 		t.Fatal(err)
 	}
 	ops, invalid := f.snapshot()
 	if invalid {
 		t.Fatal("unbounded initialization operation")
 	}
-	if ops[0] != cfg.MQTTBaseTopic+"/status=offline" || ops[1] != "subscribe smartpi/#" ||
+	if ops[0] != cfg.MQTTBaseTopic+"/status=offline" || ops[5] != "subscribe smartpi/#" ||
 		ops[len(ops)-1] != cfg.MQTTBaseTopic+"/status=online" ||
-		len(ops) != len(discoverySensors(cfg))+len(obsoleteSensorKeys)+3 {
+		len(ops) != len(discoverySensors(cfg))+len(obsoleteSensorKeys)+7 {
 		t.Fatalf("unexpected initialization ordering: %v", ops)
 	}
 }
@@ -152,6 +152,7 @@ func TestInitializeMQTTFailures(t *testing.T) {
 		change func(*fakeMQTT)
 	}{
 		{"offline rejected", func(f *fakeMQTT) { f.publishAck.ReasonCode = 0x87 }},
+		{"energy rejected", func(f *fakeMQTT) { f.failPrefix = "guardrelay/ampguard/state/energy_" }},
 		{"discovery rejected", func(f *fakeMQTT) { f.failPrefix = "homeassistant/" }},
 		{"subscribe transport", func(f *fakeMQTT) { f.subErr = errors.New("lost connection") }},
 		{"subscribe rejected", func(f *fakeMQTT) { f.subAck.Reasons = []byte{0x87} }},
@@ -163,7 +164,8 @@ func TestInitializeMQTTFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeMQTT()
 			tt.change(f)
-			if err := initializeMQTT(context.Background(), testConfig(), f); err == nil {
+			cfg := testConfig()
+			if err := initializeMQTT(context.Background(), cfg, f, newSmartPiRelay(cfg)); err == nil {
 				t.Fatal("initialization failure was ignored")
 			}
 			ops, _ := f.snapshot()
@@ -318,6 +320,7 @@ func TestRunWithLocalMQTTBroker(t *testing.T) {
 func serveLifecycleBroker(conn net.Conn, cfg *Config, cancel context.CancelFunc) error {
 	var online, measurement, offlineAfterOnline bool
 	discoveryCount := 0
+	zeroEnergy := make(map[string]bool)
 	for {
 		packet, err := packets.ReadPacket(conn)
 		if err != nil {
@@ -328,6 +331,9 @@ func serveLifecycleBroker(conn net.Conn, cfg *Config, cancel context.CancelFunc)
 		case *packets.Connect:
 			response = packets.NewControlPacket(packets.CONNACK)
 		case *packets.Subscribe:
+			if len(zeroEnergy) != 4 {
+				return fmt.Errorf("subscription started before all energy startup zeros")
+			}
 			response = packets.NewControlPacket(packets.SUBACK)
 			ack := response.Content.(*packets.Suback)
 			ack.PacketID, ack.Reasons = packet.PacketID, []byte{1}
@@ -364,6 +370,12 @@ func serveLifecycleBroker(conn net.Conn, cfg *Config, cancel context.CancelFunc)
 				}
 				measurement = true
 			default:
+				if strings.HasPrefix(packet.Topic, cfg.MQTTBaseTopic+"/state/energy_") {
+					if !packet.Retain || packet.QoS != 1 || string(packet.Payload) != "0" {
+						return fmt.Errorf("incorrect retained energy startup zero: %s=%s", packet.Topic, packet.Payload)
+					}
+					zeroEnergy[packet.Topic] = true
+				}
 				if strings.HasPrefix(packet.Topic, cfg.HADiscoveryPref+"/sensor/") && packet.Retain && len(packet.Payload) != 0 {
 					discoveryCount++
 				}
