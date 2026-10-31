@@ -21,6 +21,7 @@ type Config struct {
 	LogLevel        string
 	SmartPiPrefix   string
 	PhaseFreshness  time.Duration
+	EnergyStateFile string
 }
 
 func mustEnv(k, def string) string {
@@ -46,6 +47,7 @@ func loadConfig() (*Config, error) {
 		LogLevel:        mustEnv("LOG_LEVEL", "info"),
 		SmartPiPrefix:   mustEnv("SMARTPI_PREFIX", "smartpi"),
 		PhaseFreshness:  freshness,
+		EnergyStateFile: mustEnv("ENERGY_STATE_FILE", ""),
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err

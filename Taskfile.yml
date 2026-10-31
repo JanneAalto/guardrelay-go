@@ -83,6 +83,7 @@ tasks:
           {{printf "SMARTPI_PREFIX=%q" .SMARTPI_PREFIX | shellQuote}} \
           'LOG_LEVEL="info"' \
           'PHASE_FRESHNESS="3s"' \
+          'ENERGY_STATE_FILE="/var/lib/guardrelay/energy.json"' \
           > {{.SERVICE_DIR | shellQuote}}/guardrelay.defaults
 
 

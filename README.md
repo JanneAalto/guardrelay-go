@@ -26,7 +26,7 @@ Reads SmartPi MQTT measurements (e.g., `smartpi/I1 2.54`, `smartpi/P3 1802.23`) 
 - Subscribes to: `smartpi/#`
 - Publishes current, voltage, power, power factor, and frequency under `guardrelay/ampguard/state/<key>`
 - Calculates `power_total = P1+P2+P3`
-- Estimates per-phase and total imported kWh in memory; counters reset on restart
+- Estimates per-phase and total imported kWh, with optional local checkpoints
 - LWT/availability: `guardrelay/ampguard/status` (`online`/`offline`)
 - Home Assistant MQTT discovery (`homeassistant/sensor/<unique_id>/config`, retain)
 
@@ -129,8 +129,8 @@ task update:pi HOST=pi@raspberrypi ARCH=arm64
 
 The update requires an existing installed service and the selected local binary.
 It stops the service, installs the binary, and starts the service again without
-changing configuration. Both updates and reinstalls restart the process, resetting
-the in-memory energy counters.
+changing configuration. Both updates and reinstalls restart the process. Energy
+counters survive graceful restarts when checkpoint storage is enabled.
 
 ### Installation on rpi-pihole (32-bit)
 
@@ -151,6 +151,12 @@ For later binary-only updates:
 task build:pi-armv7
 task update:pi HOST=pi@rpi-pihole ARCH=armv7
 ```
+
+To enable checkpoint storage on an existing installation, rerun the deploy and
+install commands above so the updated systemd unit is installed. A binary-only
+update does not install the new unit. Existing broker configuration is preserved.
+The first enabled run starts at zero unless a checkpoint already exists; the
+upgrade cannot recover the previous memory-only totals.
 
 ### Systemd Management Commands
 ```bash
@@ -180,6 +186,7 @@ sudo journalctl -u guardrelay -f
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
 | `PHASE_FRESHNESS`    | Maximum phase sample age/energy integration interval, a positive Go duration (default: `3s`) |
+| `ENERGY_STATE_FILE`  | Optional local energy checkpoint path; unset/empty disables persistence. The Pi unit defaults to `/var/lib/guardrelay/energy.json`. |
 
 `MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
 an explicit port, for example `mqtt://192.168.1.10:1883` or
@@ -264,8 +271,10 @@ The first sample establishes a baseline; zero or negative previous power adds
 no imported energy. `energy_total` is the sum of the three imported counters,
 not the integral of signed net power. Each phase integrates independently.
 
-Counters reset to zero on every process restart, and zero states are published
-before accumulation begins. They survive MQTT reconnects, but connection changes
+Without `ENERGY_STATE_FILE`, counters reset to zero on every process restart.
+With checkpoint storage enabled, the saved per-phase counters are restored and
+their sum is recalculated. Initial restored or zero states are acknowledged before
+accumulation begins. Counters survive MQTT reconnects, but connection changes
 clear integration baselines. Retained replay, stale intervals, non-positive time
 intervals, and downtime do not add energy; the next live sample reestablishes the
 baseline. This intentionally undercounts during gaps rather than inventing usage.
@@ -274,14 +283,42 @@ not a replacement for a billing meter.
 
 Energy states use kWh with Home Assistant's `total_increasing` state class and
 are retained in MQTT so discovery subscribers can obtain the latest counters,
-including startup zeros. The relay never restores counters from MQTT. Retained
-broker state is only a published snapshot, not persistence for the relay.
+including the initial restored or zero values. The relay never restores counters
+from MQTT. Retained broker state is only a published snapshot, not persistence
+for the relay.
 Snapshots are republished on reconnect and live power updates; publication errors
 are logged and initialization cannot announce online if its energy snapshot fails.
 
-There are no energy state files or checkpoint writes on the Raspberry Pi SD card.
-Normal OS/journal logging and any persistence configured on the MQTT broker are
-separate from this relay's in-memory counters.
+### Energy checkpoints
+
+The Pi service enables `/var/lib/guardrelay/energy.json`. Systemd creates its
+directory owned by `guardrelay` with mode `0700`; checkpoint files use mode `0600`.
+Native/local runs remain memory-only unless `ENERGY_STATE_FILE` is set to a
+writable path, for example `./state/energy.json`. Set `ENERGY_STATE_FILE=""` in
+`/etc/default/guardrelay` to disable checkpoints for the service.
+
+The relay saves changed counters **every 10 minutes and on graceful shutdown**.
+A missing checkpoint starts at zero and is created before MQTT connects.
+Unchanged counters do not trigger rewrites. Each save synchronizes a temporary
+file in the same directory, atomically replaces the single JSON file, and
+synchronizes the directory. The file does not grow over time; temporary files
+from successful saves are not retained. An abrupt kill during a save can leave
+a small temporary file, which is not used for restoration.
+
+Only per-phase imported-energy counters and their meter identity are saved.
+Phase readings and timestamps are never restored, so downtime cannot be
+backfilled. Corrupt, incompatible, or differently identified checkpoints fail
+startup instead of silently resetting counters. Checkpoint write failures stop
+the relay with an error rather than silently operating without persistence.
+Changing `HA_DEVICE_ID`, `SMARTPI_PREFIX`, or `MQTT_BASE_TOPIC` requires a separate
+checkpoint path or an intentional reset: stop the service and remove the old file.
+
+A graceful restart preserves the latest counters. Abrupt power loss can roll
+them back to the last checkpoint, losing up to 10 minutes of accumulated usage.
+Home Assistant may interpret that decrease as a counter reset, affecting its
+statistics. Checkpoints do not account for usage while the relay is stopped.
+This trades a small number of SD-card writes for limited crash-time loss; OS,
+journal, and MQTT-broker persistence remain separate.
 
 ### Discovery migration
 

@@ -272,6 +272,16 @@ func run(ctx context.Context, cfg *Config) error {
 		<-l.done
 		return err
 	}
+	if err := l.relay.restoreCheckpoint(); err != nil {
+		stopLife()
+		<-l.done
+		return err
+	}
+	if err := l.relay.saveCheckpoint(); err != nil {
+		stopLife()
+		<-l.done
+		return err
+	}
 	// Keep the transport alive after the signal so offline can be acknowledged.
 	mqttCtx, stopMQTT := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopMQTT()
@@ -281,18 +291,31 @@ func run(ctx context.Context, cfg *Config) error {
 		<-l.done
 		return err
 	}
+	checkpointResult := make(chan error, 1)
+	checkpointDone := make(chan struct{})
+	go func() {
+		defer close(checkpointDone)
+		checkpointResult <- l.relay.checkpointEvery(lifeCtx)
+	}()
 	select {
 	case <-ctx.Done():
 	case err = <-l.errs:
+	case err = <-checkpointResult:
 	case <-cm.Done():
 		err = fmt.Errorf("MQTT connection manager stopped unexpectedly")
 	}
 	stopLife()
 	<-l.done
+	<-checkpointDone
+	select {
+	case checkpointErr := <-checkpointResult:
+		err = errors.Join(err, checkpointErr)
+	default:
+	}
 	l.receiveMu.Lock()
 	l.receiveMu.Unlock()
 	l.mu.Lock()
 	connected := l.connected
 	l.mu.Unlock()
-	return errors.Join(err, shutdownMQTT(context.WithoutCancel(ctx), cfg, cm, connected))
+	return errors.Join(err, shutdownMQTT(context.WithoutCancel(ctx), cfg, cm, connected), l.relay.saveCheckpoint())
 }

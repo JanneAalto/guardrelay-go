@@ -195,6 +195,7 @@ func TestServiceDefaults(t *testing.T) {
 	for _, line := range []string{
 		fmt.Sprintf("MQTT_URL=%q\n", url), `SMARTPI_PREFIX="custom/smartpi"`,
 		`HA_DEVICE_ID="chargeamps_amp_guard"`, `PHASE_FRESHNESS="3s"`,
+		`ENERGY_STATE_FILE="/var/lib/guardrelay/energy.json"`,
 	} {
 		if !strings.Contains(string(data), line) {
 			t.Errorf("defaults missing %q", line)
@@ -208,8 +209,10 @@ func TestServiceDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(unit), "EnvironmentFile=/etc/default/guardrelay\n") ||
-		strings.Contains(string(unit), "StateDirectory=") {
-		t.Fatal("unit must require configuration without adding energy persistence")
+		!strings.Contains(string(unit), "StateDirectory=guardrelay\n") ||
+		!strings.Contains(string(unit), "StateDirectoryMode=0700\n") ||
+		!strings.Contains(string(unit), "Environment=ENERGY_STATE_FILE=/var/lib/guardrelay/energy.json\n") {
+		t.Fatal("unit must require configuration and provision protected checkpoint storage")
 	}
 	info, err := os.Stat(path)
 	if err != nil {

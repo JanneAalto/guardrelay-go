@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -395,6 +396,7 @@ func TestRunWireDiscoveryRejectionNeverAnnouncesOnline(t *testing.T) {
 	for len(broker.deleted) == 0 {
 		broker.read()
 	}
+
 	// Do not cancel first: the rejected PUBACK itself must stop initialization.
 	for {
 		if _, ok := broker.read().Content.(*packets.Disconnect); ok {
@@ -419,4 +421,31 @@ func TestRunWireDiscoveryRejectionNeverAnnouncesOnline(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("rejected discovery did not stop the relay")
 	}
+}
+
+func TestRunWireCheckpointSurvivesGracefulRestart(t *testing.T) {
+	listener, cfg := wireListener(t)
+	cfg.EnergyStateFile = filepath.Join(t.TempDir(), "state", "energy.json")
+	r := startWireRelay(t, cfg)
+	first := acceptWireBroker(t, listener, cfg)
+	first.ready([4]float64{})
+	first.measurement("P1", "1000", "power_l1", "1000.0000", false)
+	first.measurement("P1", "1000", "power_l1", "1000.0000", false)
+	want := first.energy
+	if want[0] <= 0 {
+		t.Fatal("phase did not accumulate imported energy")
+	}
+	first.shutdown(r)
+	state := readCheckpoint(t, cfg.EnergyStateFile)
+	if *state.Phases[0] != want[0] {
+		t.Fatal("graceful shutdown did not checkpoint the latest counters")
+	}
+	restarted := startWireRelay(t, cfg)
+	second := acceptWireBroker(t, listener, cfg)
+	second.ready(want)
+	second.measurement("P1", "0", "power_l1", "0.0000", false)
+	if second.energy != want || len(second.states["power_total"]) != 0 {
+		t.Fatal("restored counters brought back stale integration baselines")
+	}
+	second.shutdown(restarted)
 }

@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 User=guardrelay
 Group=guardrelay
+StateDirectory=guardrelay
+StateDirectoryMode=0700
+Environment=ENERGY_STATE_FILE=/var/lib/guardrelay/energy.json
 EnvironmentFile=/etc/default/guardrelay
 ExecStart=/usr/local/bin/guardrelay
 Restart=always

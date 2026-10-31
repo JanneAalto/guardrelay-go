@@ -21,6 +21,7 @@ func TestLoadConfig(t *testing.T) {
 	for _, key := range []string{
 		"MQTT_URL", "MQTT_CLIENT_ID", "MQTT_BASE_TOPIC", "HA_DISCOVERY_PREFIX",
 		"HA_DEVICE_ID", "HA_DEVICE_NAME", "LOG_LEVEL", "SMARTPI_PREFIX", "PHASE_FRESHNESS",
+		"ENERGY_STATE_FILE",
 	} {
 		t.Setenv(key, "")
 	}
@@ -34,6 +35,14 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.MQTTClientID != "guardrelay-ampguard" || cfg.PhaseFreshness != 3*time.Second {
 		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+	if cfg.EnergyStateFile != "" {
+		t.Fatal("native checkpoint storage should be opt-in")
+	}
+	t.Setenv("ENERGY_STATE_FILE", "/var/lib/guardrelay/energy.json")
+	cfg, err = loadConfig()
+	if err != nil || cfg.EnergyStateFile != "/var/lib/guardrelay/energy.json" {
+		t.Fatalf("checkpoint configuration: %+v, %v", cfg, err)
 	}
 	t.Setenv("PHASE_FRESHNESS", "30s")
 	cfg, err = loadConfig()

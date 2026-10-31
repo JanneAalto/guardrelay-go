@@ -22,6 +22,9 @@ type smartPiRelay struct {
 	energy          [3]float64
 	energyReady     bool
 	energyPublishMu sync.Mutex
+	checkpointMu    sync.Mutex
+	savedEnergy     [3]float64
+	checkpointSaved bool
 }
 
 func newSmartPiRelay(cfg *Config) *smartPiRelay {
@@ -37,7 +40,7 @@ func (r *smartPiRelay) recordPower(ctx context.Context, phase int, value float64
 	previous := r.phases[phase]
 	r.phases[phase] = phaseSample{value: value, receivedAt: receivedAt}
 	elapsed := receivedAt.Sub(previous.receivedAt)
-	// An acknowledged zero snapshot must signal the session reset before accumulation.
+	// Acknowledge the initial (restored or zero) snapshot before accumulation.
 	if !r.energyReady || previous.receivedAt.IsZero() || elapsed <= 0 || elapsed >= r.cfg.PhaseFreshness {
 		return nil
 	}
