@@ -105,6 +105,29 @@ sudo journalctl -u guardrelay -f
 | `HA_DEVICE_NAME`     | Device name for HA |
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
+| `PHASE_FRESHNESS`    | Maximum phase sample age/energy interval, a positive Go duration (default: `3s`; calculation enforcement is added in the calculation fixes) |
+
+`MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
+an explicit port, for example `mqtt://192.168.1.10:1883` or
+`tls://broker.example:8883`. Supported schemes are `mqtt`, `tcp`, `tls`, `mqtts`,
+`ssl`, `mqtt+ssl`, `tcps`, `ws`, and `wss`; WebSocket URLs may include a path.
+Optional URL credentials are sent in MQTT CONNECT and removed from the transport
+URL used in logs. TLS connections verify certificates and require TLS 1.2 or newer.
+
+Topic prefixes must not contain MQTT wildcards or empty levels, start/end with
+`/`, or use the reserved `$` prefix. Input, output, and discovery prefixes must
+not overlap. `HA_DEVICE_ID` accepts letters, digits, underscores, and hyphens
+(up to 256 characters). Invalid configuration fails at startup.
+
+The relay publishes retained `offline` while initializing a connection, then
+`online` only after subscription and discovery acknowledgments succeed.
+Initialization failures stop the process with an error; systemd can restart it.
+Reconnects repeat initialization. Graceful shutdown publishes retained `offline`
+before disconnecting using fresh, bounded contexts. DISCONNECT also requests
+publication of the offline will, covering cancellation during initial setup.
+If a shutdown publication fails, the error is reported and disconnect is still attempted.
+`info` enables normal connection/error logs; `debug` additionally enables Paho
+protocol diagnostics.
 
 ## Topic Mapping
 

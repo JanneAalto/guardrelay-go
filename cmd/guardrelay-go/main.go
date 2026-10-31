@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -15,45 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
 	"github.com/eclipse/paho.golang/paho"
 )
-
-type Config struct {
-	MQTTURL         string
-	MQTTClientID    string
-	MQTTBaseTopic   string
-	HADiscoveryPref string
-	HADeviceID      string
-	HADeviceName    string
-	LogLevel        string
-	SmartPiPrefix   string
-}
-
-func mustEnv(k, def string) string {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def
-	}
-	return v
-}
-
-func loadConfig() (*Config, error) {
-	cfg := &Config{
-		MQTTURL:         mustEnv("MQTT_URL", ""),
-		MQTTClientID:    mustEnv("MQTT_CLIENT_ID", "guardrelay-ampguard"),
-		MQTTBaseTopic:   mustEnv("MQTT_BASE_TOPIC", "guardrelay/ampguard"),
-		HADiscoveryPref: mustEnv("HA_DISCOVERY_PREFIX", "homeassistant"),
-		HADeviceID:      mustEnv("HA_DEVICE_ID", "chargeamps_amp_guard"),
-		HADeviceName:    mustEnv("HA_DEVICE_NAME", "Charge Amps Amp Guard"),
-		LogLevel:        mustEnv("LOG_LEVEL", "info"),
-		SmartPiPrefix:   mustEnv("SMARTPI_PREFIX", "smartpi"),
-	}
-	if cfg.MQTTURL == "" {
-		return nil, fmt.Errorf("MQTT_URL is required")
-	}
-	return cfg, nil
-}
 
 type HADevice struct {
 	Identifiers  []string `json:"identifiers"`
@@ -125,90 +86,26 @@ func discoverySensors(cfg *Config) []SensorConfig {
 	return out
 }
 
-func connectMQTT(ctx context.Context, cfg *Config) (*autopaho.ConnectionManager, error) {
-	u, err := url.Parse(cfg.MQTTURL)
-	if err != nil {
-		return nil, err
-	}
-	var cm *autopaho.ConnectionManager
-	pass, _ := u.User.Password()
-	cliCfg := autopaho.ClientConfig{
-		ServerUrls:                    []*url.URL{u},
-		ConnectUsername:               u.User.Username(),
-		ConnectPassword:               []byte(pass),
-		KeepAlive:                     30,
-		CleanStartOnInitialConnection: false,
-		SessionExpiryInterval:         86400,
-		OnConnectionUp: func(cm *autopaho.ConnectionManager, ca *paho.Connack) {
-			log.Println("MQTT connected")
-			if _, subErr := cm.Subscribe(
-				ctx, &paho.Subscribe{
-					Subscriptions: []paho.SubscribeOptions{{Topic: cfg.SmartPiPrefix + "/#", QoS: 1}},
-				},
-			); subErr != nil {
-				log.Printf("Failed to subscribe to topic %s: %v", cfg.SmartPiPrefix+"/#", subErr)
-			}
-			publishAvailability(ctx, cfg, cm, true)
-			publishDiscovery(ctx, cfg, cm)
-		},
-		OnConnectError: func(err error) { log.Printf("MQTT connection error: %v", err) },
-
-		WillMessage: &paho.WillMessage{
-			Topic:   cfg.MQTTBaseTopic + "/status",
-			Payload: []byte("offline"),
-			QoS:     1,
-			Retain:  true,
-		},
-
-		ClientConfig: paho.ClientConfig{
-			ClientID: cfg.MQTTClientID,
-			OnPublishReceived: []func(pr paho.PublishReceived) (bool, error){
-				func(pr paho.PublishReceived) (bool, error) {
-					handleSmartPi(pr.Packet, cfg, ctx, cm)
-					return true, nil
-				},
-			},
-		},
-	}
-	if u.Scheme == "mqtts" || u.Scheme == "ssl" || u.Scheme == "tcps" {
-		cliCfg.TlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
-	}
-
-	cm, err = autopaho.NewConnection(ctx, cliCfg)
-	if err != nil {
-		return nil, err
-	}
-	if err := cm.AwaitConnection(ctx); err != nil {
-		return nil, err
-	}
-	return cm, nil
-}
-
-func publish(ctx context.Context, cm *autopaho.ConnectionManager, topic string, payload []byte, retain bool) {
-	_, err := cm.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Retain: retain, Payload: payload})
-	if err != nil {
-		log.Printf("Publish error %s: %v", topic, err)
-	}
-}
-
-func publishDiscovery(ctx context.Context, cfg *Config, cm *autopaho.ConnectionManager) {
+func publishDiscovery(ctx context.Context, cfg *Config, cm mqttPublisher) error {
 	for _, sc := range discoverySensors(cfg) {
 		js, err := json.Marshal(sc)
 		if err != nil {
-			log.Printf("Failed to marshal sensor config: %v", err)
-			continue
+			return fmt.Errorf("marshal sensor %s: %w", sc.UniqueID, err)
 		}
 		topic := fmt.Sprintf("%s/sensor/%s/config", cfg.HADiscoveryPref, sc.UniqueID)
-		publish(ctx, cm, topic, js, true)
+		if err := publish(ctx, cm, topic, js, true); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func publishAvailability(ctx context.Context, cfg *Config, cm *autopaho.ConnectionManager, online bool) {
+func publishAvailability(ctx context.Context, cfg *Config, cm mqttPublisher, online bool) error {
 	state := "offline"
 	if online {
 		state = "online"
 	}
-	publish(ctx, cm, cfg.MQTTBaseTopic+"/status", []byte(state), true)
+	return publish(ctx, cm, cfg.MQTTBaseTopic+"/status", []byte(state), true)
 }
 
 type totals struct {
@@ -220,7 +117,7 @@ var lastTotals totals
 
 var tot totals
 
-func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm *autopaho.ConnectionManager) {
+func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm mqttPublisher) {
 	topic := pub.Topic
 	if !strings.HasPrefix(topic, cfg.SmartPiPrefix+"/") {
 		return
@@ -284,7 +181,9 @@ func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm *auto
 
 	stateTopic := fmt.Sprintf("%s/state/%s", cfg.MQTTBaseTopic, outKey)
 	payload := []byte(strconv.FormatFloat(val, 'f', 4, 64))
-	publish(ctx, cm, stateTopic, payload, false)
+	if err := publish(ctx, cm, stateTopic, payload, false); err != nil {
+		log.Print(err)
+	}
 
 	if tot.p[0] != nil && tot.p[1] != nil && tot.p[2] != nil {
 		timeSince := time.Since(tot.lastTS)
@@ -292,14 +191,30 @@ func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm *auto
 			sum := *tot.p[0] + *tot.p[1] + *tot.p[2]
 			if !math.IsNaN(sum) && !math.IsInf(sum, 0) {
 				lastTotals = tot
-				publish(ctx, cm, cfg.MQTTBaseTopic+"/state/power_total", []byte(strconv.FormatFloat(sum, 'f', 4, 64)), false)
+				if err := publish(
+					ctx,
+					cm,
+					cfg.MQTTBaseTopic+"/state/power_total",
+					[]byte(strconv.FormatFloat(sum, 'f', 4, 64)),
+					false,
+				); err != nil {
+					log.Print(err)
+				}
 			}
 
 			// energy calculation in kWh
 			hours := timeSince.Hours()
 			energy := (*lastTotals.p[0] + *lastTotals.p[1] + *lastTotals.p[2]) * hours / 1000.0
 			if !math.IsNaN(energy) && !math.IsInf(energy, 0) {
-				publish(ctx, cm, cfg.MQTTBaseTopic+"/state/energy_total", []byte(strconv.FormatFloat(energy, 'f', 4, 64)), false)
+				if err := publish(
+					ctx,
+					cm,
+					cfg.MQTTBaseTopic+"/state/energy_total",
+					[]byte(strconv.FormatFloat(energy, 'f', 4, 64)),
+					false,
+				); err != nil {
+					log.Print(err)
+				}
 			}
 
 			// reset totals
@@ -316,12 +231,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cm, err := connectMQTT(ctx, cfg)
-	if err != nil {
-		log.Fatalf("MQTT connect failed: %v", err)
+	if err := run(ctx, cfg); err != nil {
+		log.Fatal(err)
 	}
-
-	defer cm.Disconnect(ctx)
-
-	<-ctx.Done()
 }
