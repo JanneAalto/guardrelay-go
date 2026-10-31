@@ -132,6 +132,26 @@ It stops the service, installs the binary, and starts the service again without
 changing configuration. Both updates and reinstalls restart the process, resetting
 the in-memory energy counters.
 
+### Installation on rpi-pihole (32-bit)
+
+`rpi-pihole` reports `armv7l` from `uname -m` and `32` from
+`getconf LONG_BIT`, so use the ARMv7 target.
+
+Run these commands from the project directory on your development machine,
+replacing `192.168.1.10` with your MQTT broker's address:
+
+```bash
+task deploy:pi-armv7 HOST=pi@rpi-pihole MQTT_URL=mqtt://192.168.1.10:1883
+task install:pi HOST=pi@rpi-pihole
+```
+
+For later binary-only updates:
+
+```bash
+task build:pi-armv7
+task update:pi HOST=pi@rpi-pihole ARCH=armv7
+```
+
 ### Systemd Management Commands
 ```bash
 # Start the service:
