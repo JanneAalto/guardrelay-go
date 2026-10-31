@@ -24,7 +24,7 @@ Reads SmartPi MQTT measurements (e.g., `smartpi/I1 2.54`, `smartpi/P3 1802.23`) 
 
 - MQTT v5 client using [paho.golang](https://github.com/eclipse-paho/paho.golang) + `autopaho`
 - Subscribes to: `smartpi/#`
-- Publishes: `guardrelay/ampguard/state/{current|voltage|power}_...`
+- Publishes current, voltage, power, power factor, and frequency under `guardrelay/ampguard/state/<key>`
 - Calculates `power_total = P1+P2+P3`
 - LWT/availability: `guardrelay/ampguard/status` (`online`/`offline`)
 - Home Assistant MQTT discovery (`homeassistant/sensor/<unique_id>/config`, retain)
@@ -131,19 +131,55 @@ protocol diagnostics.
 
 ## Topic Mapping
 
-SmartPi → GuardRelay:
+SmartPi inputs map to `guardrelay/ampguard/state/<key>` by default:
 
-- `smartpi/I1` → `current_l1`
-- `smartpi/I2` → `current_l2`
-- `smartpi/I3` → `current_l3`
-- `smartpi/I4` → `current_total`
-- `smartpi/V1` → `voltage_l1`
-- `smartpi/V2` → `voltage_l2`
-- `smartpi/V3` → `voltage_l3`
-- `smartpi/P1` → `power_l1`
-- `smartpi/P2` → `power_l2`
-- `smartpi/P3` → `power_l3`
-- `power_total` = sum of P1 + P2 + P3
+| Input topic | Output key | Unit |
+|-------------|------------|------|
+| `smartpi/I1` | `current_l1` | A |
+| `smartpi/I2` | `current_l2` | A |
+| `smartpi/I3` | `current_l3` | A |
+| `smartpi/I4` | `current_l4` | A |
+| `smartpi/V1` | `voltage_l1` | V |
+| `smartpi/V2` | `voltage_l2` | V |
+| `smartpi/V3` | `voltage_l3` | V |
+| `smartpi/P1` | `power_l1` | W |
+| `smartpi/P2` | `power_l2` | W |
+| `smartpi/P3` | `power_l3` | W |
+| `smartpi/COS1` | `power_factor_l1` | Dimensionless |
+| `smartpi/COS2` | `power_factor_l2` | Dimensionless |
+| `smartpi/COS3` | `power_factor_l3` | Dimensionless |
+| `smartpi/F1` | `frequency_l1` | Hz |
+| `smartpi/F2` | `frequency_l2` | Hz |
+| `smartpi/F3` | `frequency_l3` | Hz |
+
+`I4` is the fourth measured current channel, not a calculated total or an assumed
+neutral current. `COS1`-`COS3` are forwarded as power factors (for example `0.48`),
+not converted to angles or percentages. Home Assistant supports the `power_factor`
+device class [without a unit](https://www.home-assistant.io/integrations/sensor/#device-class).
+There is no `voltage_total` sensor because summing phase voltages is not a meaningful
+total for this relay.
+
+The input prefix is configurable with `SMARTPI_PREFIX`. Only the exact input
+topics above are processed; unrelated or nested topics such as `smartpi/I1/extra`
+are ignored. Numeric payloads may use a decimal point or decimal comma and retain
+their sign. Malformed payloads, NaN, and infinities are logged and rejected.
+
+`power_total` remains the sum of P1 + P2 + P3. Power freshness and cumulative
+imported-energy corrections are separate calculation fixes; the existing energy
+calculation is not yet a reliable cumulative meter.
+
+### Discovery migration
+
+On each connection, the relay removes retained discovery configurations for
+`current_total`, `voltage_total`, and `phase_angle_l1`-`phase_angle_l3`, then
+publishes the corrected entities. Cleanup uses the configured `HA_DEVICE_ID` and
+`HA_DISCOVERY_PREFIX`; it does not remove entities belonging to other devices.
+
+Replace dashboard/automation references to the old current and phase-angle
+entities with the new fourth-channel current and power-factor entities as
+appropriate. Existing phase current, voltage, and power topics and unique IDs
+are unchanged. If you change the device ID or discovery prefix, configurations
+under the previous identity must be cleaned up separately.
 
 
 ### Running Locally

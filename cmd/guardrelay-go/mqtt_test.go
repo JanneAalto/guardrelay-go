@@ -141,7 +141,7 @@ func TestInitializeMQTTOrdering(t *testing.T) {
 	}
 	if ops[0] != cfg.MQTTBaseTopic+"/status=offline" || ops[1] != "subscribe smartpi/#" ||
 		ops[len(ops)-1] != cfg.MQTTBaseTopic+"/status=online" ||
-		len(ops) != len(discoverySensors(cfg))+3 {
+		len(ops) != len(discoverySensors(cfg))+len(obsoleteSensorKeys)+3 {
 		t.Fatalf("unexpected initialization ordering: %v", ops)
 	}
 }
@@ -364,7 +364,7 @@ func serveLifecycleBroker(conn net.Conn, cfg *Config, cancel context.CancelFunc)
 				}
 				measurement = true
 			default:
-				if strings.HasPrefix(packet.Topic, cfg.HADiscoveryPref+"/sensor/") && packet.Retain {
+				if strings.HasPrefix(packet.Topic, cfg.HADiscoveryPref+"/sensor/") && packet.Retain && len(packet.Payload) != 0 {
 					discoveryCount++
 				}
 			}

@@ -36,37 +36,44 @@ type SensorConfig struct {
 	PayloadNotAvailable string   `json:"payload_not_available,omitempty"`
 }
 
+type sensorDefinition struct {
+	input, key, icon, name, unit, stateClass, deviceClass string
+	powerPhase                                            int
+}
+
+var sensorDefinitions = []sensorDefinition{
+	{"I1", "current_l1", "mdi:lightning-bolt-outline", "Current L1", "A", "measurement", "current", 0},
+	{"I2", "current_l2", "mdi:lightning-bolt-outline", "Current L2", "A", "measurement", "current", 0},
+	{"I3", "current_l3", "mdi:lightning-bolt-outline", "Current L3", "A", "measurement", "current", 0},
+	{"I4", "current_l4", "mdi:lightning-bolt-outline", "Current channel 4", "A", "measurement", "current", 0},
+	{"V1", "voltage_l1", "mdi:sine-wave", "Voltage L1", "V", "measurement", "voltage", 0},
+	{"V2", "voltage_l2", "mdi:sine-wave", "Voltage L2", "V", "measurement", "voltage", 0},
+	{"V3", "voltage_l3", "mdi:sine-wave", "Voltage L3", "V", "measurement", "voltage", 0},
+	{"P1", "power_l1", "mdi:flash-outline", "Power L1", "W", "measurement", "power", 1},
+	{"P2", "power_l2", "mdi:flash-outline", "Power L2", "W", "measurement", "power", 2},
+	{"P3", "power_l3", "mdi:flash-outline", "Power L3", "W", "measurement", "power", 3},
+	{"", "power_total", "mdi:flash-outline", "Power Total", "W", "measurement", "power", 0},
+	{"", "energy_l1", "mdi:lightning-bolt", "Energy L1", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_l2", "mdi:lightning-bolt", "Energy L2", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_l3", "mdi:lightning-bolt", "Energy L3", "kWh", "total_increasing", "energy", 0},
+	{"", "energy_total", "mdi:lightning-bolt", "Energy Total", "kWh", "total_increasing", "energy", 0},
+	{"COS1", "power_factor_l1", "mdi:angle-acute", "Power factor L1", "", "measurement", "power_factor", 0},
+	{"COS2", "power_factor_l2", "mdi:angle-acute", "Power factor L2", "", "measurement", "power_factor", 0},
+	{"COS3", "power_factor_l3", "mdi:angle-acute", "Power factor L3", "", "measurement", "power_factor", 0},
+	{"F1", "frequency_l1", "mdi:sine-wave", "Frequency L1", "Hz", "measurement", "frequency", 0},
+	{"F2", "frequency_l2", "mdi:sine-wave", "Frequency L2", "Hz", "measurement", "frequency", 0},
+	{"F3", "frequency_l3", "mdi:sine-wave", "Frequency L3", "Hz", "measurement", "frequency", 0},
+}
+
+var obsoleteSensorKeys = []string{
+	"current_total", "voltage_total", "phase_angle_l1", "phase_angle_l2", "phase_angle_l3",
+}
+
 func discoverySensors(cfg *Config) []SensorConfig {
 	avail := cfg.MQTTBaseTopic + "/status"
 	dev := HADevice{Identifiers: []string{cfg.HADeviceID}, Manufacturer: "Charge Amps", Model: "Amp Guard", Name: cfg.HADeviceName}
-	type row struct{ key, icon, name, unit, stateClass, dclass string }
-	rows := []row{
-		{"current_l1", "mdi:lightning-bolt-outline", "Current L1", "A", "measurement", "current"},
-		{"current_l2", "mdi:lightning-bolt-outline", "Current L2", "A", "measurement", "current"},
-		{"current_l3", "mdi:lightning-bolt-outline", "Current L3", "A", "measurement", "current"},
-		{"current_total", "mdi:lightning-bolt-outline", "Current Total", "A", "measurement", "current"},
-
-		{"voltage_l1", "mdi:sine-wave", "Voltage L1", "V", "measurement", "voltage"},
-		{"voltage_l2", "mdi:sine-wave", "Voltage L2", "V", "measurement", "voltage"},
-		{"voltage_l3", "mdi:sine-wave", "Voltage L3", "V", "measurement", "voltage"},
-		{"voltage_total", "mdi:sine-wave", "Voltage Total", "V", "measurement", "voltage"},
-
-		{"power_l1", "mdi:flash-outline", "Power L1", "W", "measurement", "power"},
-		{"power_l2", "mdi:flash-outline", "Power L2", "W", "measurement", "power"},
-		{"power_l3", "mdi:flash-outline", "Power L3", "W", "measurement", "power"},
-		{"power_total", "mdi:flash-outline", "Power Total", "W", "measurement", "power"},
-
-		{"energy_l1", "mdi:lightning-bolt", "Energy L1", "kWh", "total_increasing", "energy"},
-		{"energy_l2", "mdi:lightning-bolt", "Energy L2", "kWh", "total_increasing", "energy"},
-		{"energy_l3", "mdi:lightning-bolt", "Energy L3", "kWh", "total_increasing", "energy"},
-		{"energy_total", "mdi:lightning-bolt", "Energy Total", "kWh", "total_increasing", "energy"},
-
-		{"phase_angle_l1", "mdi:angle-acute", "Phase angle L1", "deg", "measurement", "None"},
-		{"phase_angle_l2", "mdi:angle-acute", "Phase angle L2", "deg", "measurement", "None"},
-		{"phase_angle_l3", "mdi:angle-acute", "Phase angle L3", "deg", "measurement", "None"},
-	}
-	out := make([]SensorConfig, 0, len(rows))
-	for _, r := range rows {
+	out := make([]SensorConfig, 0, len(sensorDefinitions))
+	for _, r := range sensorDefinitions {
 		out = append(
 			out, SensorConfig{
 				Name:                r.name,
@@ -74,7 +81,7 @@ func discoverySensors(cfg *Config) []SensorConfig {
 				UniqueID:            cfg.HADeviceID + "_" + r.key,
 				StateTopic:          cfg.MQTTBaseTopic + "/state/" + r.key,
 				UnitOfMeasurement:   r.unit,
-				DeviceClass:         r.dclass,
+				DeviceClass:         r.deviceClass,
 				StateClass:          r.stateClass,
 				Device:              dev,
 				AvailabilityTopic:   avail,
@@ -87,6 +94,12 @@ func discoverySensors(cfg *Config) []SensorConfig {
 }
 
 func publishDiscovery(ctx context.Context, cfg *Config, cm mqttPublisher) error {
+	for _, key := range obsoleteSensorKeys {
+		topic := fmt.Sprintf("%s/sensor/%s_%s/config", cfg.HADiscoveryPref, cfg.HADeviceID, key)
+		if err := publish(ctx, cm, topic, nil, true); err != nil {
+			return err
+		}
+	}
 	for _, sc := range discoverySensors(cfg) {
 		js, err := json.Marshal(sc)
 		if err != nil {
@@ -122,64 +135,31 @@ func handleSmartPi(pub *paho.Publish, cfg *Config, ctx context.Context, cm mqttP
 	if !strings.HasPrefix(topic, cfg.SmartPiPrefix+"/") {
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(topic, cfg.SmartPiPrefix+"/"), "/")
-	if len(parts) < 1 {
-		return
-	}
-	key := parts[0]
-
-	msg := strings.TrimSpace(string(pub.Payload))
-	val, err := strconv.ParseFloat(msg, 64)
-	if err != nil {
-		if v2, err2 := strconv.ParseFloat(strings.ReplaceAll(msg, ",", "."), 64); err2 == nil {
-			val = v2
-		} else {
-			log.Printf("SmartPi payload ei numero: topic=%s payload=%q", topic, msg)
-			return
+	key := strings.TrimPrefix(topic, cfg.SmartPiPrefix+"/")
+	var sensor sensorDefinition
+	found := false
+	for _, definition := range sensorDefinitions {
+		if definition.input != "" && definition.input == key {
+			sensor, found = definition, true
+			break
 		}
 	}
-
-	var outKey string
-	switch key {
-	case "I1":
-		outKey = "current_l1"
-	case "I2":
-		outKey = "current_l2"
-	case "I3":
-		outKey = "current_l3"
-
-	case "V1":
-		outKey = "voltage_l1"
-	case "V2":
-		outKey = "voltage_l2"
-	case "V3":
-		outKey = "voltage_l3"
-
-	case "COS1":
-		outKey = "phase_angle_l1"
-	case "COS2":
-		outKey = "phase_angle_l2"
-	case "COS3":
-		outKey = "phase_angle_l2"
-
-	case "P1":
-		outKey = "power_l1"
-		tot.p[0] = &val
-		tot.lastTS = time.Now()
-	case "P2":
-		outKey = "power_l2"
-		tot.p[1] = &val
-		tot.lastTS = time.Now()
-	case "P3":
-		outKey = "power_l3"
-		tot.p[2] = &val
-		tot.lastTS = time.Now()
-
-	default:
+	if !found {
 		return
 	}
 
-	stateTopic := fmt.Sprintf("%s/state/%s", cfg.MQTTBaseTopic, outKey)
+	msg := strings.TrimSpace(string(pub.Payload))
+	val, err := strconv.ParseFloat(strings.ReplaceAll(msg, ",", "."), 64)
+	if err != nil || math.IsNaN(val) || math.IsInf(val, 0) {
+		log.Printf("SmartPi payload is not a finite number: topic=%s payload=%q", topic, msg)
+		return
+	}
+	if sensor.powerPhase != 0 {
+		tot.p[sensor.powerPhase-1] = &val
+		tot.lastTS = time.Now()
+	}
+
+	stateTopic := fmt.Sprintf("%s/state/%s", cfg.MQTTBaseTopic, sensor.key)
 	payload := []byte(strconv.FormatFloat(val, 'f', 4, 64))
 	if err := publish(ctx, cm, stateTopic, payload, false); err != nil {
 		log.Print(err)
