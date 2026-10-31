@@ -33,7 +33,7 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MQTTClientID != "guardrelay-ampguard" || cfg.PhaseFreshness != 3*time.Second {
+	if cfg.MQTTClientID != "guardrelay-ampguard" || cfg.PhaseFreshness != 5*time.Second {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 	if cfg.EnergyStateFile != "" {

@@ -194,7 +194,7 @@ func TestServiceDefaults(t *testing.T) {
 	}
 	for _, line := range []string{
 		fmt.Sprintf("MQTT_URL=%q\n", url), `SMARTPI_PREFIX="custom/smartpi"`,
-		`HA_DEVICE_ID="chargeamps_amp_guard"`, `PHASE_FRESHNESS="3s"`,
+		`HA_DEVICE_ID="chargeamps_amp_guard"`, `PHASE_FRESHNESS="5s"`,
 		`ENERGY_STATE_FILE="/var/lib/guardrelay/energy.json"`,
 	} {
 		if !strings.Contains(string(data), line) {

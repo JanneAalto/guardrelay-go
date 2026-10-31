@@ -33,7 +33,7 @@ func mustEnv(k, def string) string {
 }
 
 func loadConfig() (*Config, error) {
-	freshness, err := time.ParseDuration(mustEnv("PHASE_FRESHNESS", "3s"))
+	freshness, err := time.ParseDuration(mustEnv("PHASE_FRESHNESS", "5s"))
 	if err != nil || freshness <= 0 {
 		return nil, fmt.Errorf("PHASE_FRESHNESS must be a positive Go duration (for example 3s)")
 	}
