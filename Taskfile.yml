@@ -82,7 +82,7 @@ tasks:
           'HA_DEVICE_NAME="Charge Amps Amp Guard"' \
           {{printf "SMARTPI_PREFIX=%q" .SMARTPI_PREFIX | shellQuote}} \
           'LOG_LEVEL="info"' \
-          'PHASE_FRESHNESS="5s"' \
+          'PHASE_FRESHNESS="10s"' \
           'ENERGY_STATE_FILE="/var/lib/guardrelay/energy.json"' \
           > {{.SERVICE_DIR | shellQuote}}/guardrelay.defaults
 

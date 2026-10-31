@@ -185,7 +185,7 @@ sudo journalctl -u guardrelay -f
 | `HA_DEVICE_NAME`     | Device name for HA |
 | `SMARTPI_PREFIX`     | SmartPi topic prefix (default: `smartpi`) |
 | `LOG_LEVEL`          | Logging level (`info`, `debug`) |
-| `PHASE_FRESHNESS`    | Maximum phase sample age/energy integration interval, a positive Go duration (default: `5s`) |
+| `PHASE_FRESHNESS`    | Maximum phase sample age/energy integration interval, a positive Go duration (default: `10s`) |
 | `ENERGY_STATE_FILE`  | Optional local energy checkpoint path; unset/empty disables persistence. The Pi unit defaults to `/var/lib/guardrelay/energy.json`. |
 
 `MQTT_URL` requires a supported scheme and a broker host. TCP/TLS URLs require
@@ -249,7 +249,7 @@ their sign. Malformed payloads, NaN, and infinities are logged and rejected.
 
 `power_total` is the signed sum of P1 + P2 + P3, published on live power updates
 only when all three phases have been received and each is younger than
-`PHASE_FRESHNESS` (default `5s`). Each phase has its own receipt timestamp.
+`PHASE_FRESHNESS` (default `10s`). Each phase has its own receipt timestamp.
 Repeated updates reuse the other phases' latest fresh values instead of requiring
 a new three-message batch. Missing/stale phases and non-finite sums suppress the
 total; phase readings continue to be forwarded individually. Suppression does not
@@ -258,8 +258,8 @@ clear the last value already displayed in Home Assistant.
 Disconnect/reconnect clears phase samples. Retained power messages are forwarded
 as individual phase states but are excluded from aggregation because their
 measurement times are unknown. Aggregation resumes after all three live phases
-arrive. The `5s` default tolerates normal scheduling jitter for SmartPi's roughly
-3-second update cadence; if it publishes less frequently, increase
+arrive. The `10s` default tolerates normal scheduling jitter for SmartPi's
+roughly 5-second update cadence; if it publishes less frequently, increase
 `PHASE_FRESHNESS`, for example to `30s`.
 
 ### Imported energy
